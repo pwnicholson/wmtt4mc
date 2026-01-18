@@ -32,24 +32,21 @@ jobs:
           pip install -r requirements.txt
           pip install pyinstaller
 
-      # OPTIONAL: if you have tests, run them here.
-      # - name: Run tests
-      #   run: python -m pytest
-
-      - name: Build with PyInstaller
+      - name: Build one-file executable with PyInstaller
         run: |
-          pyinstaller --noconfirm --clean --windowed --name WMTT4MC wmtt4mc.py
+          pyinstaller --noconfirm --clean --windowed --onefile --name WMTT4MC wmtt4mc.py
         shell: bash
 
-      # Package outputs into zip files for release upload
       - name: Package artifact (Windows)
         if: runner.os == 'Windows'
         run: |
-          powershell -Command "Compress-Archive -Path dist\\WMTT4MC\\* -DestinationPath WMTT4MC-windows.zip"
+          powershell -Command "Compress-Archive -Path dist\\WMTT4MC.exe -DestinationPath WMTT4MC-windows.zip"
+
       - name: Package artifact (macOS)
         if: runner.os == 'macOS'
         run: |
           cd dist
+          # PyInstaller produces an executable named WMTT4MC (no .exe) on macOS
           ditto -c -k --sequesterRsrc --keepParent WMTT4MC ../WMTT4MC-macos.zip
 
       - name: Upload Release Assets
@@ -58,3 +55,4 @@ jobs:
           files: |
             WMTT4MC-windows.zip
             WMTT4MC-macos.zip
+
