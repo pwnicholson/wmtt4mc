@@ -1,0 +1,114 @@
+{
+  "environment": {
+    "python_version": "3.11.9",
+    "python_path": "C:\\Users\\webst\\AppData\\Local\\Programs\\Python\\Python311\\python.exe",
+    "platform": "Windows",
+    "architecture": "AMD64",
+    "python_ok": true,
+    "issues": [],
+    "recommendations": []
+  },
+  "files": {
+    "files": {
+      "wmtt4mc.py": {
+        "exists": true,
+        "size": 113553,
+        "description": "Main application"
+      },
+      "palette.json": {
+        "exists": true,
+        "size": 84523,
+        "description": "Block color palette"
+      },
+      "requirements.txt": {
+        "exists": true,
+        "size": 49,
+        "description": "Python dependencies"
+      }
+    },
+    "issues": [],
+    "recommendations": []
+  },
+  "dependencies": {
+    "dependencies": {
+      "required": {
+        "numpy==1.26.4": null,
+        "pillow==12.1.0": null,
+        "amulet-core==1.9.34": null
+      },
+      "numpy": {
+        "status": "ok",
+        "display": "numpy"
+      },
+      "PIL": {
+        "status": "ok",
+        "display": "PIL (Pillow)"
+      },
+      "tkinter": {
+        "status": "ok",
+        "display": "tkinter"
+      },
+      "amulet": {
+        "status": "ok",
+        "display": "amulet-core"
+      },
+      "threading": {
+        "status": "ok",
+        "display": "threading (built-in)"
+      },
+      "queue": {
+        "status": "ok",
+        "display": "queue (built-in)"
+      },
+      "json": {
+        "status": "ok",
+        "display": "json (built-in)"
+      },
+      "os": {
+        "status": "ok",
+        "display": "os (built-in)"
+      },
+      "tempfile": {
+        "status": "ok",
+        "display": "tempfile (built-in)"
+      }
+    },
+    "issues": [],
+    "recommendations": []
+  },
+  "palette": {
+    "analysis": {
+      "file_size": 84523,
+      "total_entries": 1111,
+      "wood_variants": 77,
+      "stone_variants": 60,
+      "water_variants": 3,
+      "sample_woods": [
+        "minecraft:acacia_door_bottom",
+        "minecraft:acacia_door_top",
+        "minecraft:acacia_leaves",
+        "minecraft:acacia_log",
+        "minecraft:acacia_log_top"
+      ],
+      "sample_stones": [
+        "minecraft:blackstone",
+        "minecraft:blackstone_top",
+        "minecraft:chiseled_polished_blackstone"
+      ],
+      "sample_waters": [
+        "minecraft:water_flow",
+        "minecraft:water_overlay",
+        "minecraft:water_still"
+      ]
+    },
+    "issues": [],
+    "recommendations": []
+  },
+  "import_test": {
+    "status": "success",
+    "version": "1.5.2ad",
+    "build": "2026.01.20.2",
+    "issues": [],
+    "recommendations": []
+  }
+}
