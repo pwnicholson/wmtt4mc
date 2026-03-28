@@ -1,0 +1,11 @@
+{
+  "folders": [
+    {
+      "name": "wmtt4mc",
+      "path": "."
+    }
+  ],
+  "settings": {
+    "git.openRepositoryInParentFolders": "never"
+  }
+}
