@@ -106,7 +106,7 @@
   },
   "import_test": {
     "status": "success",
-    "version": "1.5.2ad",
+    "version": "1.6.0",
     "build": "2026.01.20.2",
     "issues": [],
     "recommendations": []

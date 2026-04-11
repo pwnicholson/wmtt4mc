@@ -1,6 +1,6 @@
 WMTT4MC (World Map Timeline Tool for Minecraft) — Known-good restore pack
 
-This pack is based on v1.5.1b (confirmed working earlier).
+This pack is based on v1.6.0.
 
 Contents:
 - wmtt4mc.py
