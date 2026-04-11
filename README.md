@@ -43,3 +43,15 @@ Forks are allowed under the Non-Commercial Public License, but:
 
 - For questions and bug reports, open an Issue on GitHub.
 - For commercial licensing inquiries, see [COMMERCIAL_LICENSE.md](COMMERCIAL_LICENSE.md).
+
+## Self-test: Check for Syntax/Import Errors
+
+Before running the app, you can check for basic Python errors with:
+
+    python test_syntax.py
+
+This script will:
+- Check for syntax errors in wmtt4mc.py
+- Try to import wmtt4mc.py (catches missing dependencies, major import bugs)
+
+If both checks pass, you should be able to run the app normally. If there are errors, the script will print details to help you fix them.

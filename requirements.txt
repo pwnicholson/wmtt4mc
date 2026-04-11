@@ -1,3 +1,5 @@
 numpy==1.26.4
 pillow==12.1.0
 amulet-core==1.9.34
+psutil==6.0.0
+zstandard==0.25.0
