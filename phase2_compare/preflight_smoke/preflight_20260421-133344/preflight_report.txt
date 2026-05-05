@@ -1,0 +1,39 @@
+World Map Timeline Tool for Minecraft v1.6.0 (build 2026.04.21.06)
+Preflight folder: c:\Users\webst\Documents\GitHub\wmtt4mc\phase2_compare\preflight_smoke\preflight_20260421-133344
+Input folder: F:/Development/WMTTT4MC-Master/Season Eight SAMPLE
+Output folder: c:\Users\webst\Documents\GitHub\wmtt4mc\phase2_compare\preflight_smoke
+Dimension: minecraft:overworld | y=[0,320]
+Target: 1080p (1920x1080)
+Output cache mode: all_blocks
+Crop: disabled
+------------------------------------------------------------
+[DISCOVERY] Found 4 raw backup(s).
+  - Season Eight 2025-10-11.zip (kind: zip)
+  - Season Eight 2025-12-11.zip (kind: zip)
+  - Season Eight 2026-03-04.zip (kind: zip)
+  - Season Eight 2026-03-27.zip (kind: zip)
+[DISCOVERY] Found 5 cache file(s).
+  - Season Eight 2025-10-11_nether.wmtt4mc
+  - Season Eight 2025-10-11_overworld.wmtt4mc
+  - Season Eight 2025-12-11_end.wmtt4mc
+  - Season Eight 2025-12-11_nether.wmtt4mc
+  - Season Eight 2025-12-11_overworld.wmtt4mc
+[DISCOVERY SUMMARY]
+  Total items: 4
+  Matched caches: 2
+[CACHE I/O] Header cache: 2 accesses (0.0% hit rate)
+[PREFLIGHT PLAN]
+  01. Season Eight 2025-10-11.zip -> USE CACHE (Season Eight 2025-10-11_overworld.wmtt4mc) mode=all_blocks y=[0,320]
+  02. Season Eight 2025-12-11.zip -> USE CACHE (Season Eight 2025-12-11_overworld.wmtt4mc) mode=all_blocks y=[0,320]
+  03. Season Eight 2026-03-04.zip -> USE RAW (Season Eight 2026-03-04.zip) cache_match(surface=false:missing, all_blocks=false:missing)
+      expected_surface=F:/Development/WMTTT4MC-Master/Season Eight SAMPLE\Season Eight 2026-03-04_overworld_surface.wmtt4mc
+      expected_all_blocks=F:/Development/WMTTT4MC-Master/Season Eight SAMPLE\Season Eight 2026-03-04_overworld_allblocks.wmtt4mc
+  04. Season Eight 2026-03-27.zip -> USE RAW (Season Eight 2026-03-27.zip) cache_match(surface=false:missing, all_blocks=false:missing)
+      expected_surface=F:/Development/WMTTT4MC-Master/Season Eight SAMPLE\Season Eight 2026-03-27_overworld_surface.wmtt4mc
+      expected_all_blocks=F:/Development/WMTTT4MC-Master/Season Eight SAMPLE\Season Eight 2026-03-27_overworld_allblocks.wmtt4mc
+[PREFLIGHT SUMMARY]
+  Planned cache-backed items: 2
+  Planned raw items: 2
+  Total planned items: 4
+Saved preflight text report: c:\Users\webst\Documents\GitHub\wmtt4mc\phase2_compare\preflight_smoke\preflight_20260421-133344\preflight_report.txt
+Saved preflight JSON report: c:\Users\webst\Documents\GitHub\wmtt4mc\phase2_compare\preflight_smoke\preflight_20260421-133344\preflight_report.json

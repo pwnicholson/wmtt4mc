@@ -2,9 +2,11 @@
 
 A backlog of ideas to revisit after core stability and correctness are solid.
 
+## Problems to fix
+- ETA is still unreliable
+
 ## Rendering speed & efficiency
 - Progressive outputs: generate an animated GIF as soon as 2 frames exist, then update/overwrite the GIF each time a new frame completes (so partial results are viewable if a run is cancelled).
-- Extract-only-needed world data from backups (avoid unpacking full server archives; only worlds + relevant dimension folders) to reduce disk + time.
 
 ## Crop / camera tools
 - Visual crop selection from a quick-scan map preview.
@@ -15,14 +17,10 @@ A backlog of ideas to revisit after core stability and correctness are solid.
 - Very advanced: auto-pan/auto-zoom through the timelapse to highlight regions of build activity (detect changes between consecutive frames).
 
 ## Color, palettes, and visuals
-- Make height-based shading more pronounced / increase contrast (hills should read more clearly; keep cliffs/ravines distinct without crushing blacks).
 - Biome tint toggle: Off / Basic / Accurate.
   - Off: treat tintable textures as their default (roughly "plains").
   - Basic: apply a single fixed biome tint (plains) everywhere (faster).
   - Accurate: read biome data per column and apply biome-specific grass/foliage/water tint (slower).
-- Optional palette override path in the UI (advanced) — currently palette.json is auto-located next to the script/exe; a UI field would let users point to a specific file.
-- Palette editor/viewer tool (GUI): browse/search blocks, edit colors, and mark blocks as transparent/ignored.
-- Integrate the block palette editor app into the main tool, allowing in-app editing, loading, and saving of custom palettes.
 - Flowers rendering toggle (render as full pixel vs treat as transparent) to reduce noise, while still allowing colorful flower fields.
 - "Night mode" (advanced): dim all blocks except within a radius of light sources, accounting for light level falloff.
 

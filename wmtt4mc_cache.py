@@ -785,6 +785,7 @@ def discover_with_diagnostics(folder: str, log_cb: Optional[Callable] = None, di
     diag: Dict[str, Any] = {
         "raw_sources": [],
         "cache_files": [],
+        "ignored_tmp_files": [],
         "matches": 0,
         "stale_caches": 0,
         "orphaned_caches": 0,
@@ -812,9 +813,15 @@ def discover_with_diagnostics(folder: str, log_cb: Optional[Callable] = None, di
         if is_cache_file(path):
             cache_items.append((name, path))
             diag["cache_files"].append(name)
+        elif os.path.isfile(path) and name.lower().endswith(".wmtt4mc.tmp"):
+            diag["ignored_tmp_files"].append(name)
     log(f"[DISCOVERY] Found {len(cache_items)} cache file(s).")
     for name, path in cache_items:
         log(f"  - {name}")
+    if diag["ignored_tmp_files"]:
+        log(f"[DISCOVERY] Ignoring {len(diag['ignored_tmp_files'])} temporary cache file(s) (*.wmtt4mc.tmp).")
+        for name in diag["ignored_tmp_files"]:
+            log(f"  - {name}")
     
     # Run discovery with matching
     results = discover_snapshot_inputs(folder, dimension=dimension)
@@ -844,6 +851,8 @@ def discover_with_diagnostics(folder: str, log_cb: Optional[Callable] = None, di
         log(f"  Orphaned caches (no source): {diag['orphaned_caches']}")
     if diag["corrupted_caches"]:
         log(f"  Corrupted cache files: {diag['corrupted_caches']} (will be ignored)")
+    if diag["ignored_tmp_files"]:
+        log(f"  Ignored temporary cache files: {len(diag['ignored_tmp_files'])}")
     
     # Log cache I/O performance (if caching is enabled)
     try:

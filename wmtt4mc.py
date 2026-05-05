@@ -21,7 +21,7 @@ from pathlib import Path
 # === Third-party imports ===
 import numpy as np
 from PIL import Image
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 from typing import Optional, Tuple, Dict, List, Any, Callable, Union
 try:
     import amulet
@@ -53,6 +53,7 @@ from wmtt4mc_cache import (
     read_block_lookup,
     read_cache_header,
     sidecar_cache_path,
+    snapshot_stem,
 )
 
 # === Palette stubs (prevent NameError) ===
@@ -64,6 +65,56 @@ CONCRETE_POWDER_COLOR_PALETTE = {}
 CARPET_COLOR_PALETTE = {}
 STAINED_GLASS_COLOR_PALETTE = {}
 STAINED_GLASS_PANE_COLOR_PALETTE = {}
+
+# Track active process pools so UI stop/close can forcefully terminate workers.
+_ACTIVE_PROCESS_POOLS: List[Any] = []
+_ACTIVE_PROCESS_POOLS_LOCK = threading.Lock()
+
+
+def _register_process_pool(pool: Any) -> None:
+    with _ACTIVE_PROCESS_POOLS_LOCK:
+        if pool not in _ACTIVE_PROCESS_POOLS:
+            _ACTIVE_PROCESS_POOLS.append(pool)
+
+
+def _unregister_process_pool(pool: Any) -> None:
+    with _ACTIVE_PROCESS_POOLS_LOCK:
+        try:
+            _ACTIVE_PROCESS_POOLS.remove(pool)
+        except ValueError:
+            pass
+
+
+def _force_stop_registered_pools(log_cb: Optional[Callable[[str], None]] = None) -> None:
+    with _ACTIVE_PROCESS_POOLS_LOCK:
+        pools = list(_ACTIVE_PROCESS_POOLS)
+    for pool in pools:
+        try:
+            pool.shutdown(wait=False, cancel_futures=True)
+        except Exception:
+            pass
+        try:
+            procs = getattr(pool, "_processes", None)
+            if isinstance(procs, dict):
+                for _pid, proc in list(procs.items()):
+                    try:
+                        if proc is not None and proc.is_alive():
+                            proc.terminate()
+                    except Exception:
+                        pass
+                for _pid, proc in list(procs.items()):
+                    try:
+                        if proc is not None and proc.is_alive() and hasattr(proc, "kill"):
+                            proc.kill()
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+    if log_cb:
+        try:
+            log_cb(f"[POOL] Forced stop requested for {len(pools)} active process pool(s).")
+        except Exception:
+            pass
 
 
 def _raw_block_id(block: Any) -> str:
@@ -1048,7 +1099,7 @@ def _get_next_build_number() -> str:
     })
     return f"{today}.{build_num:02d}"
 
-APP_VERSION = "1.6.0"
+APP_VERSION = "1.7.0"
 # Build number increments per code change (and can be force-bumped with WMTT4MC_FORCE_BUILD_BUMP=1).
 APP_BUILD = _get_next_build_number()
 APP_ABBR = "WMTT4MC"
@@ -2171,6 +2222,30 @@ PALETTE = {
     'minecraft:wildflowers': (237, 214, 117),
     'minecraft:wildflowers_stem': (169, 169, 169),
     'minecraft:wither_rose': (41, 45, 23),
+    # Legacy block-ID compatibility keys (pre-v1.6 block names)
+    'minecraft:ancient_debris': (110, 80, 70),
+    'minecraft:barrel': (130, 95, 60),
+    'minecraft:blackstone_wall': (38, 38, 40),
+    'minecraft:chest': (150, 110, 65),
+    'minecraft:crafting_table': (140, 105, 70),
+    'minecraft:dirt_path': (148, 122, 65),
+    'minecraft:furnace': (110, 110, 110),
+    'minecraft:grass': (106, 170, 64),
+    'minecraft:grass_block': (106, 170, 64),
+    'minecraft:large_fern': (88, 150, 62),
+    'minecraft:lava': (255, 80, 0),
+    'minecraft:moss_carpet': (90, 160, 75),
+    'minecraft:mycelium': (120, 90, 120),
+    'minecraft:podzol': (122, 102, 62),
+    'minecraft:scaffolding': (190, 170, 120),
+    'minecraft:slab': (140, 130, 120),
+    'minecraft:snow_block': (240, 240, 240),
+    'minecraft:stairs': (140, 130, 120),
+    'minecraft:tall_grass': (106, 170, 64),
+    'minecraft:trapdoor': (150, 120, 80),
+    'minecraft:wall_torch': (245, 200, 80),
+    'minecraft:water': (64, 64, 255),
+    'minecraft:wheat': (167, 152, 73),
     'minecraft:yellow_candle': (209, 165, 50),
     'minecraft:yellow_candle_lit': (217, 184, 75),
     'minecraft:yellow_concrete': (241, 175, 21),
@@ -2184,6 +2259,104 @@ PALETTE = {
 }
 # Always build palette lookup tables at module load to avoid NameError in subprocesses
 PALETTE_KEY_TO_IDX, PALETTE_COLOR_TABLE = build_palette_lookup(PALETTE)
+
+
+def _avg_rgb(values: List[Tuple[int, int, int]]) -> Optional[Tuple[int, int, int]]:
+    if not values:
+        return None
+    n = len(values)
+    r = int(sum(v[0] for v in values) / n)
+    g = int(sum(v[1] for v in values) / n)
+    b = int(sum(v[2] for v in values) / n)
+    return (r, g, b)
+
+
+_GENERIC_SUFFIX_FAMILIES: Dict[str, str] = {
+    "minecraft:fence": "_fence",
+    "minecraft:fence_gate": "_fence_gate",
+    "minecraft:wall": "_wall",
+    "minecraft:button": "_button",
+    "minecraft:pressure_plate": "_pressure_plate",
+    "minecraft:door": "_door_bottom",
+    "minecraft:trapdoor": "_trapdoor",
+    "minecraft:sign": "_sign",
+    "minecraft:wall_sign": "_wall_sign",
+    "minecraft:wall_hanging_sign": "_hanging_sign",
+    "minecraft:wall_banner": "_wall_banner",
+    "minecraft:bed": "_bed_top",
+    "minecraft:wood": "_wood",
+}
+
+
+_GENERIC_DIRECT_FALLBACKS: Dict[str, Tuple[int, int, int]] = {
+    # Generic IDs commonly produced by universal mappings and caches.
+    "minecraft:bamboo": (122, 168, 84),
+    "minecraft:tall_seagrass": (50, 140, 120),
+    "minecraft:melon": (118, 170, 62),
+    "minecraft:mangrove_roots": (92, 78, 62),
+    "minecraft:pumpkin": (196, 126, 46),
+    "minecraft:cactus": (78, 136, 62),
+    "minecraft:potatoes": (133, 152, 74),
+    "minecraft:bubble_column": (64, 64, 255),
+    "minecraft:beetroots": (129, 94, 70),
+    "minecraft:carrots": (189, 128, 56),
+    "minecraft:hay_block": (192, 170, 72),
+    "minecraft:magma_block": (172, 78, 42),
+    "minecraft:sweet_berry_bush": (132, 62, 58),
+    "minecraft:composter": (130, 96, 62),
+    "minecraft:bars": (150, 150, 150),
+    "minecraft:coral": (186, 114, 132),
+    "minecraft:button": (132, 108, 84),
+    "minecraft:wall_banner": (154, 96, 78),
+    "minecraft:wall_sign": (134, 94, 72),
+    "minecraft:wall_hanging_sign": (134, 94, 72),
+    "minecraft:pressure_plate": (136, 116, 90),
+    "minecraft:bed": (166, 92, 92),
+    "minecraft:sign": (134, 94, 72),
+    "minecraft:carpet": (148, 126, 98),
+    "minecraft:wood": (122, 94, 66),
+    "minecraft:fire": (255, 98, 18),
+    "minecraft:shelf": (140, 106, 72),
+    "minecraft:hopper": (84, 84, 88),
+    "minecraft:campfire": (126, 95, 64),
+    "minecraft:azalea": (94, 166, 84),
+    "minecraft:item_frame_block": (148, 106, 68),
+    "minecraft:coral_fan": (189, 126, 148),
+    "minecraft:small_dripleaf": (92, 152, 76),
+    "minecraft:big_dripleaf": (92, 152, 76),
+    "minecraft:ender_chest": (34, 28, 52),
+    "minecraft:bee_nest": (184, 152, 80),
+    "minecraft:head": (176, 140, 118),
+    "minecraft:coral_block": (182, 112, 132),
+    "minecraft:cocoa": (132, 88, 54),
+    "minecraft:infested_block": (126, 126, 126),
+    "minecraft:flowering_azalea": (100, 172, 92),
+    "minecraft:sticky_piston_head": (132, 114, 94),
+    "minecraft:decorated_pot": (158, 112, 80),
+    "minecraft:waxed_exposed_chiseled_copper": (110, 150, 118),
+    "minecraft:golem_statue": (156, 156, 156),
+}
+
+
+@lru_cache(maxsize=8192)
+def _generic_palette_family_fallback(block_id: str) -> Optional[Tuple[int, int, int]]:
+    """Best-effort color for generic IDs by reusing nearby palette families."""
+    # First try stem/prefix variants like wheat_stage*, smoker_front, melon_side, etc.
+    prefix = block_id + "_"
+    prefix_hits = [rgb for key, rgb in PALETTE.items() if key.startswith(prefix)]
+    avg = _avg_rgb(prefix_hits)
+    if avg is not None:
+        return avg
+
+    # Then try known family suffixes for generic IDs like fence/wall/button/sign.
+    suffix = _GENERIC_SUFFIX_FAMILIES.get(block_id)
+    if suffix:
+        suffix_hits = [rgb for key, rgb in PALETTE.items() if key.endswith(suffix)]
+        avg = _avg_rgb(suffix_hits)
+        if avg is not None:
+            return avg
+
+    return _GENERIC_DIRECT_FALLBACKS.get(block_id)
 
 
 # Variant palettes (best-effort). If Amulet exposes variant properties (eg wood_type/color),
@@ -2346,6 +2519,13 @@ class RenderOptions:
 
 class CancelledError(Exception):
     pass
+
+
+def clone_render_options(opt: "RenderOptions") -> "RenderOptions":
+    """Clone RenderOptions while ignoring runtime-only ad-hoc attributes."""
+    field_names = {f.name for f in fields(RenderOptions)}
+    data = {k: v for k, v in vars(opt).items() if k in field_names}
+    return RenderOptions(**data)
 
 
 
@@ -2736,6 +2916,12 @@ def classify_block(block, extra_palette: Optional[Dict[str, Tuple[int, int, int]
     if bid in PALETTE:
         return PALETTE[bid], bid, True, "palette"
 
+    # Generic-ID fallback: resolve IDs like "minecraft:fence" or crop roots
+    # using nearby palette family entries before dropping to gray unknown.
+    generic_rgb = _generic_palette_family_fallback(bid)
+    if generic_rgb is not None:
+        return generic_rgb, bid, True, "generic_palette_fallback"
+
     # Non-gray defaults for big generic buckets
     if bid == "minecraft:leaves":
         return (72, 144, 48), bid, True, "generic"
@@ -2755,7 +2941,7 @@ def classify_block(block, extra_palette: Optional[Dict[str, Tuple[int, int, int]
         return (150, 120, 80), bid, True, "heuristic"
     if bid.endswith("_slab") or bid.endswith("_stairs"):
         return (135, 115, 85), bid, True, "heuristic"
-    if "water" in bid or bid.endswith(":seagrass") or "kelp" in bid:
+    if "water" in bid or "seagrass" in bid or "kelp" in bid or "bubble_column" in bid:
         return (64, 64, 255), bid, True, "heuristic"
     if "lava" in bid:
         return (255, 80, 0), bid, True, "heuristic"
@@ -3199,6 +3385,153 @@ def snapshot_input_from_path(path: str) -> SnapshotInput:
     return SnapshotInput(kind="zip", path=path, display_name=display_name, sort_name=display_name)
 
 
+_REGION_PATH_RE = re.compile(r"(?:^|/)region/r\.(-?\d+)\.(-?\d+)\.mca$", re.IGNORECASE)
+
+
+def _path_matches_dimension(path_lower: str, dimension: str) -> bool:
+    dim = str(dimension or "minecraft:overworld").strip().lower()
+    # Dimension folders are Java conventions; for overworld, exclude nether/end subfolders.
+    if dim == "minecraft:the_nether":
+        return "/dim-1/region/" in path_lower
+    if dim == "minecraft:the_end":
+        return "/dim1/region/" in path_lower
+    return ("/region/" in path_lower) and ("/dim-1/" not in path_lower) and ("/dim1/" not in path_lower)
+
+
+def _estimate_block_area_from_region_paths(paths: List[str], dimension: str) -> Optional[int]:
+    min_rx = min_rz = None
+    max_rx = max_rz = None
+    for raw_path in paths:
+        p = str(raw_path).replace("\\", "/")
+        low = p.lower()
+        if not _path_matches_dimension(low, dimension):
+            continue
+        m = _REGION_PATH_RE.search(low)
+        if not m:
+            continue
+        rx = int(m.group(1))
+        rz = int(m.group(2))
+        min_rx = rx if (min_rx is None) else min(min_rx, rx)
+        max_rx = rx if (max_rx is None) else max(max_rx, rx)
+        min_rz = rz if (min_rz is None) else min(min_rz, rz)
+        max_rz = rz if (max_rz is None) else max(max_rz, rz)
+
+    if None in (min_rx, max_rx, min_rz, max_rz):
+        return None
+
+    # A region is 32x32 chunks; a chunk is 16x16 blocks.
+    chunks_x = (int(max_rx) - int(min_rx) + 1) * 32
+    chunks_z = (int(max_rz) - int(min_rz) + 1) * 32
+    blocks_x = chunks_x * 16
+    blocks_z = chunks_z * 16
+    return max(1, int(blocks_x) * int(blocks_z))
+
+
+def _estimate_bedrock_block_area_from_entries(paths: List[str], size_lookup: Optional[Dict[str, int]] = None) -> Optional[int]:
+    db_bytes = 0
+    db_files = 0
+    for raw_path in paths:
+        p = str(raw_path).replace("\\", "/")
+        low = p.lower()
+        if "/db/" not in low:
+            continue
+        leaf = low.rsplit("/", 1)[-1]
+        if leaf in {"current", "lock", "manifest"}:
+            continue
+        if not (
+            leaf.endswith(".ldb")
+            or leaf.endswith(".sst")
+            or leaf.endswith(".log")
+            or leaf.startswith("manifest-")
+        ):
+            continue
+        db_files += 1
+        if size_lookup is not None:
+            db_bytes += int(size_lookup.get(raw_path, 0) or 0)
+
+    if db_files <= 0:
+        return None
+
+    # Heuristic: ~8 KiB of DB payload per active chunk entry.
+    if db_bytes <= 0:
+        est_chunks = max(64, db_files * 64)
+    else:
+        est_chunks = max(64, int(db_bytes // 8192))
+    return max(1, int(est_chunks) * 256)
+
+
+def estimate_snapshot_block_area_with_source(snapshot: SnapshotInput, dimension: str) -> Tuple[Optional[int], str]:
+    """Best-effort, fast block-area estimate for progress/ETA weighting.
+
+    Order of preference:
+    1) .wmtt4mc cache header bounds (exact cached extent)
+    2) Java region filenames (ZIP/folder metadata scan, no world load)
+    3) Bedrock LevelDB footprint heuristic (ZIP/folder metadata scan)
+    """
+    try:
+        path = snapshot.path
+        if is_cache_file(path) and os.path.isfile(path):
+            h = read_cache_header(path)
+            min_cx = int(h.get("min_cx"))
+            max_cx = int(h.get("max_cx"))
+            min_cz = int(h.get("min_cz"))
+            max_cz = int(h.get("max_cz"))
+            chunks_x = max(0, max_cx - min_cx + 1)
+            chunks_z = max(0, max_cz - min_cz + 1)
+            if chunks_x > 0 and chunks_z > 0:
+                return int(chunks_x * 16) * int(chunks_z * 16), "cache-header"
+    except Exception:
+        pass
+
+    src = snapshot.raw_path or snapshot.path
+    try:
+        if os.path.isfile(src) and src.lower().endswith(".zip") and zipfile.is_zipfile(src):
+            with zipfile.ZipFile(src, "r") as zf:
+                names = zf.namelist()
+                area = _estimate_block_area_from_region_paths(names, dimension)
+                if area is not None:
+                    return area, "java-region"
+                try:
+                    size_lookup = {zi.filename: int(getattr(zi, "file_size", 0) or 0) for zi in zf.infolist()}
+                except Exception:
+                    size_lookup = None
+                area = _estimate_bedrock_block_area_from_entries(names, size_lookup=size_lookup)
+                if area is not None:
+                    return area, "bedrock-db-size"
+                return None, "fallback"
+        if os.path.isdir(src):
+            region_candidates: List[str] = []
+            bedrock_candidates: List[str] = []
+            bedrock_sizes: Dict[str, int] = {}
+            for root, _dirs, files in os.walk(src):
+                for fn in files:
+                    full_path = os.path.join(root, fn)
+                    if fn.lower().endswith(".mca"):
+                        rel = os.path.relpath(full_path, src)
+                        region_candidates.append(rel)
+                    rel_any = os.path.relpath(full_path, src)
+                    bedrock_candidates.append(rel_any)
+                    try:
+                        bedrock_sizes[rel_any] = int(os.path.getsize(full_path))
+                    except Exception:
+                        pass
+            area = _estimate_block_area_from_region_paths(region_candidates, dimension)
+            if area is not None:
+                return area, "java-region"
+            area = _estimate_bedrock_block_area_from_entries(bedrock_candidates, size_lookup=bedrock_sizes)
+            if area is not None:
+                return area, "bedrock-db-size"
+    except Exception:
+        pass
+
+    return None, "fallback"
+
+
+def estimate_snapshot_block_area(snapshot: SnapshotInput, dimension: str) -> Optional[int]:
+    area, _source = estimate_snapshot_block_area_with_source(snapshot, dimension)
+    return area
+
+
 def _resolve_snapshot_world_roots(source_path: str, out_dir: str) -> Tuple[Optional[str], List[str]]:
     if is_world_folder(source_path):
         return None, [source_path]
@@ -3558,11 +3891,15 @@ def build_snapshot_cache(
             pool.join()
         except CancelledError:
             pool.terminate()
-            pool.join()
+            _jt = threading.Thread(target=pool.join, daemon=True)
+            _jt.start()
+            _jt.join(timeout=5.0)
             raise
         except Exception:
             pool.terminate()
-            pool.join()
+            _jt = threading.Thread(target=pool.join, daemon=True)
+            _jt.start()
+            _jt.join(timeout=5.0)
             if cancel_event is not None and cancel_event.is_set():
                 raise CancelledError("Cancelled during cache build.")
             raise
@@ -3808,6 +4145,7 @@ def render_snapshot_input(
     cancel_event: Optional[threading.Event] = None,
     debug_snapshot_path: Optional[str] = None,
     debug_context_header: str = "",
+    stage_cb: Optional[Callable[[str], None]] = None,
 ) -> Tuple[int, int, int, int, int, int, int, int, int]:
     source_path = snapshot.path
     if is_cache_file(source_path):
@@ -3823,7 +4161,8 @@ def render_snapshot_input(
         except RuntimeError as exc:
             # If the cache is surface-only but the requested Y range differs,
             # try falling back to an all-blocks sidecar or the raw world source.
-            if "top blocks" in str(exc).lower() or "surface" in str(exc).lower():
+            exc_text = str(exc).lower()
+            if "top blocks" in exc_text or "surface" in exc_text:
                 raw_src = snapshot.raw_path
                 allblocks_path = sidecar_cache_path(
                     raw_src if raw_src else source_path,
@@ -3865,16 +4204,50 @@ def render_snapshot_input(
                         cancel_event=cancel_event,
                         debug_snapshot_path=debug_snapshot_path,
                         debug_context_header=debug_context_header,
+                        stage_cb=stage_cb,
+                    )
+            # If cache exists but has no chunks for the selected crop area,
+            # try raw source (if available) instead of failing the frame.
+            if "no cached chunks found" in exc_text:
+                raw_src = snapshot.raw_path
+                if raw_src and (raw_src.lower().endswith(".zip") or is_world_folder(raw_src)):
+                    if log_cb:
+                        log_cb(
+                            f"[FALLBACK] Cache has no chunks for selected area. "
+                            f"Rendering directly from: {os.path.basename(raw_src)}"
+                        )
+                    fallback_snap = SnapshotInput(
+                        kind=snapshot.kind,
+                        path=raw_src,
+                        display_name=snapshot.display_name,
+                        sort_name=snapshot.sort_name,
+                    )
+                    return render_snapshot_input(
+                        fallback_snap,
+                        out_png,
+                        opt,
+                        log_cb=log_cb,
+                        progress_cb=progress_cb,
+                        cancel_event=cancel_event,
+                        debug_snapshot_path=debug_snapshot_path,
+                        debug_context_header=debug_context_header,
+                        stage_cb=stage_cb,
                     )
             raise
 
+    if stage_cb is not None:
+        stage_cb("raw.resolve_world_roots.start")
     with tempfile.TemporaryDirectory() as tmpdir:
         _extract_root, candidates = _resolve_snapshot_world_roots(source_path, tmpdir)
+        if stage_cb is not None:
+            stage_cb(f"raw.resolve_world_roots.done candidates={len(candidates)}")
         if not candidates:
             raise RuntimeError("Could not find a world folder (no level.dat found).")
         last_error: Optional[Exception] = None
         for world_root in candidates:
             try:
+                if stage_cb is not None:
+                    stage_cb(f"raw.world_candidate.start root={os.path.basename(world_root)}")
                 return render_world_map(
                     world_root,
                     out_png,
@@ -3884,9 +4257,12 @@ def render_snapshot_input(
                     cancel_event=cancel_event,
                     debug_snapshot_path=debug_snapshot_path,
                     debug_context_header=debug_context_header,
+                    stage_cb=stage_cb,
                 )
             except Exception as exc:
                 last_error = exc
+                if stage_cb is not None:
+                    stage_cb(f"raw.world_candidate.error {type(exc).__name__}")
         if last_error is not None:
             raise RuntimeError(f"Could not load any candidate world root: {last_error}") from last_error
         raise RuntimeError("Could not load any candidate world root.")
@@ -3901,6 +4277,7 @@ def render_world_map(
     cancel_event: Optional[threading.Event] = None,
     debug_snapshot_path: Optional[str] = None,
     debug_context_header: str = "",
+    stage_cb: Optional[Callable[[str], None]] = None,
 ) -> Tuple[int, int, int, int, int, int, int, int, int]:
     world0 = None
     try:
@@ -3909,7 +4286,11 @@ def render_world_map(
                 "Amulet API unavailable. Install/upgrade 'amulet-core' in the active environment. "
                 "Expected: amulet.load_level(...)"
             )
+        if stage_cb is not None:
+            stage_cb("raw.world_open.start")
         world0 = amulet.load_level(world_root)
+        if stage_cb is not None:
+            stage_cb("raw.world_open.done")
         is_bedrock_world = os.path.isdir(os.path.join(world_root, "db"))
     
         samples_raw: List[str] = []
@@ -3923,8 +4304,12 @@ def render_world_map(
     
     
         try:
+            if stage_cb is not None:
+                stage_cb("raw.chunk_discovery.start")
             dim_id = resolve_dimension_id(world0, opt.dimension)
             chunk_coords = world_all_chunk_coords(world0, dim_id)
+            if stage_cb is not None:
+                stage_cb(f"raw.chunk_discovery.done count={len(chunk_coords)}")
             if not chunk_coords:
                 if log_cb:
                     log_cb(f"[ERROR] No chunks found in dimension '{opt.dimension}'. World may be empty or unexplored.")
@@ -3933,6 +4318,8 @@ def render_world_map(
             # Apply optional render limiting (block X/Z rectangle). This greatly speeds up rendering
             # and focuses on the important area.
             if opt.limit_enabled:
+                if stage_cb is not None:
+                    stage_cb("raw.chunk_filter.start")
                 x1 = int(min(opt.x_min, opt.x_max))
                 x2 = int(max(opt.x_min, opt.x_max))
                 z1 = int(min(opt.z_min, opt.z_max))
@@ -3948,6 +4335,8 @@ def render_world_map(
                     for (cx, cz) in chunk_coords
                     if (min_cx <= cx <= max_cx and min_cz <= cz <= max_cz)
                 ]
+                if stage_cb is not None:
+                    stage_cb(f"raw.chunk_filter.done count={len(chunk_coords)}")
                 if not chunk_coords:
                     if log_cb:
                         log_cb(f"[ERROR] No chunks found within selected coordinate limits: x=[{x1},{x2}], z=[{z1},{z2}]. Try widening the X/Z bounds or disable 'Limit render area'.")
@@ -4070,6 +4459,8 @@ def render_world_map(
 
             from worker_fn_module import worker_fn, iter_sample_positions
     
+            if stage_cb is not None:
+                stage_cb(f"raw.chunk_scan.start chunks={chunks_total} workers={n_workers}")
             with ThreadPoolExecutor(max_workers=n_workers) as ex:
                 futures = [
                     ex.submit(
@@ -4095,6 +4486,8 @@ def render_world_map(
                     if cancel_event is not None and cancel_event.is_set():
                         break
                     fut.result()
+            if stage_cb is not None:
+                stage_cb("raw.chunk_scan.done")
 
             chunks_rendered = int(shared_counters.get("chunks_rendered", 0))
             chunks_skipped = int(shared_counters.get("chunks_skipped", 0))
@@ -4123,7 +4516,11 @@ def render_world_map(
             img = Image.fromarray(rgb, mode="RGB")
             img = fit_to_target(img, target)
             img_w, img_h = img.size
+            if stage_cb is not None:
+                stage_cb("raw.image_save.start")
             img.save(out_png)
+            if stage_cb is not None:
+                stage_cb("raw.image_save.done")
 
             if log_cb and debug_enabled:
                 log_cb(f"  Debug snapshot file: {debug_snapshot_path}")
@@ -4624,6 +5021,10 @@ def worker_run(snapshots: List[SnapshotInput],
     opt: RenderOptions,
     seconds_per_frame: float,msgq: "queue.Queue[tuple]",
     cancel_event: threading.Event,
+    stop_control: Optional[Dict[str, str]] = None,
+    input_folder: str = "",
+    output_cache_mode: str = "",
+    discovery_lines: Optional[List[str]] = None,
 ):
     try:
         run_id = time.strftime("%Y%m%d-%H%M%S")
@@ -4648,23 +5049,322 @@ def worker_run(snapshots: List[SnapshotInput],
         def progress(v: float):
             msgq.put(("progress", v))
 
+        def _force_terminate_pool(pool: Any, label: str) -> None:
+            """Best-effort hard stop for ProcessPoolExecutor workers.
+
+            Needed when a worker ignores cooperative shutdown (e.g., stuck during
+            raw ZIP cleanup). Without this, orphan workers can keep high RAM/CPU.
+            """
+            try:
+                procs = getattr(pool, "_processes", None)
+                if isinstance(procs, dict) and procs:
+                    for _pid, proc in list(procs.items()):
+                        try:
+                            if proc is not None and proc.is_alive():
+                                proc.terminate()
+                        except Exception:
+                            pass
+                    for _pid, proc in list(procs.items()):
+                        try:
+                            if proc is not None and proc.is_alive() and hasattr(proc, "kill"):
+                                proc.kill()
+                        except Exception:
+                            pass
+                    log(f"[POOL] Forced termination for {label} worker pool.")
+            except Exception:
+                pass
+
         log(f"{APP_NAME} v{APP_VERSION} (build {APP_BUILD})")
         log(f"Run folder: {run_dir}")
         log(f"Log file: {run_log_path}")
+        if input_folder:
+            log(f"Input folder: {input_folder}")
         log(f"Found {len(snapshots)} snapshots.")
         log(f"Output: {out_dir}")
         log(f"Dimension: {opt.dimension} | y=[{opt.y_min},{opt.y_max}] | seconds_per_frame={seconds_per_frame}")
         log(f"Target: {opt.target_preset} | performance mode=automatic")
+        if output_cache_mode:
+            log(f"Output cache mode: {output_cache_mode}")
+        if opt.limit_enabled:
+            log(
+                f"Crop: enabled x=[{opt.x_min},{opt.x_max}] z=[{opt.z_min},{opt.z_max}]"
+            )
+        else:
+            log("Crop: disabled")
         log("Processing order: newest snapshots first (reverse filename index).")
         log("GIF order: oldest → newest (chronological).")
+        try:
+            queue_preview = " -> ".join([s.display_name for s in snapshots])
+            log(f"Queue (newest→oldest): {queue_preview}")
+        except Exception:
+            pass
         log("Rendering frames concurrently (multiple frames at once).")
+        log("-" * 60)
+
+        if discovery_lines:
+            log("[DISCOVERY DETAILS]")
+            for line in discovery_lines:
+                try:
+                    log(str(line))
+                except Exception:
+                    pass
+            log("-" * 60)
+
+        requested_cache_mode = str(output_cache_mode or "").strip().lower()
+        if requested_cache_mode not in (CACHE_MODE_SURFACE, CACHE_MODE_ALL_BLOCKS):
+            requested_cache_mode = CACHE_MODE_NONE
+
+        if requested_cache_mode != CACHE_MODE_NONE:
+            log(
+                f"[CACHE OUTPUT] Prebuilding '{requested_cache_mode}' sidecar caches before render "
+                "for raw snapshots when missing or mismatched."
+            )
+            prepared_snapshots: List[SnapshotInput] = []
+            total_prep = len(snapshots)
+
+            # Quick pre-scan (header check only) to know how many actually need building.
+            _needs_build_count = 0
+            for _s in snapshots:
+                if not is_cache_file(_s.path):
+                    _raw = _s.raw_path or _s.path
+                    _cp = sidecar_cache_path(_raw, opt.dimension, requested_cache_mode)
+                    _ok, _ = _cache_mismatch_reason(_cp, _raw, requested_cache_mode, opt.dimension, opt.y_min, opt.y_max)
+                    if not _ok:
+                        _needs_build_count += 1
+            total_needs_build = max(1, _needs_build_count)
+            completed_builds = [0]
+            cache_phase_t0 = [time.time()]
+
+            def _fmt_cache_eta(secs: float) -> str:
+                s = max(0, int(secs))
+                return f"{s // 3600:02d}:{(s % 3600) // 60:02d}:{s % 60:02d}"
+
+            for prep_i, snap in enumerate(snapshots, start=1):
+                if cancel_event.is_set():
+                    log("[CACHE OUTPUT] Stop requested during cache preparation.")
+                    break
+
+                if is_cache_file(snap.path):
+                    prepared_snapshots.append(snap)
+                    continue
+
+                raw_src = snap.raw_path or snap.path
+                target_cache_path = sidecar_cache_path(raw_src, opt.dimension, requested_cache_mode)
+                is_match, reason = _cache_mismatch_reason(
+                    target_cache_path,
+                    raw_src,
+                    requested_cache_mode,
+                    opt.dimension,
+                    opt.y_min,
+                    opt.y_max,
+                )
+
+                if is_match:
+                    log(f"[CACHE OUTPUT] {prep_i:02d}/{total_prep:02d} using existing cache: {os.path.basename(target_cache_path)}")
+                    prepared_snapshots.append(
+                        SnapshotInput(
+                            kind="cache",
+                            path=target_cache_path,
+                            display_name=snap.display_name,
+                            sort_name=snap.sort_name,
+                            raw_path=raw_src,
+                            cache_path=target_cache_path,
+                            warning=snap.warning,
+                        )
+                    )
+                    continue
+
+                try:
+                    _build_seq = completed_builds[0] + 1
+                    _build_label = snap.display_name
+
+                    def _cache_progress_cb(
+                        done: int,
+                        total_chunks: int,
+                        frac: float,
+                        _bname: str = _build_label,
+                        _bseq: int = _build_seq,
+                        _btotal: int = total_needs_build,
+                    ) -> None:
+                        _overall = (completed_builds[0] + frac) / _btotal
+                        progress(_overall * 100.0)
+                        _elapsed = time.time() - cache_phase_t0[0]
+                        if _overall > 0.02 and _elapsed > 2.0:
+                            _rem = _elapsed / _overall - _elapsed
+                            _eta = _fmt_cache_eta(_rem)
+                        else:
+                            _eta = "--"
+                        status(
+                            f"Building caches ({_bseq}/{_btotal}): {_bname}",
+                            f"Chunk {done}/{total_chunks} — Cache build ETA {_eta}",
+                        )
+
+                    status(
+                        f"Building caches ({_build_seq}/{total_needs_build}): {snap.display_name}",
+                        "Starting… (loading world)",
+                    )
+                    progress((completed_builds[0] / total_needs_build) * 100.0)
+                    log(
+                        f"[CACHE OUTPUT] {prep_i:02d}/{total_prep:02d} building cache for {snap.display_name} "
+                        f"({reason})"
+                    )
+                    built_cache_path = build_snapshot_cache(
+                        snapshot=snap,
+                        cache_mode=requested_cache_mode,
+                        dimension=opt.dimension,
+                        y_min=opt.y_min,
+                        y_max=opt.y_max,
+                        log_cb=lambda m: log(f"[CACHE OUTPUT] {m}"),
+                        progress_cb=_cache_progress_cb,
+                        cancel_event=cancel_event,
+                    )
+                    completed_builds[0] += 1
+                    prepared_snapshots.append(
+                        SnapshotInput(
+                            kind="cache",
+                            path=built_cache_path,
+                            display_name=snap.display_name,
+                            sort_name=snap.sort_name,
+                            raw_path=raw_src,
+                            cache_path=built_cache_path,
+                            warning=snap.warning,
+                        )
+                    )
+                    log(f"[CACHE OUTPUT] Built cache for {snap.display_name}: {os.path.basename(built_cache_path)}")
+                except CancelledError:
+                    log("[CACHE OUTPUT] Cache preparation cancelled by user.")
+                    break
+                except Exception as exc:
+                    log(
+                        f"[CACHE OUTPUT] Cache build failed for {snap.display_name}: "
+                        f"{type(exc).__name__}: {exc}. Falling back to raw render for this snapshot."
+                    )
+                    prepared_snapshots.append(snap)
+
+            if prepared_snapshots:
+                snapshots = prepared_snapshots
+            status("Rendering frames…", "")
+            progress(0.0)
+            log("-" * 60)
+
+        # Cache preflight diagnostics: show what each snapshot will likely read from.
+        try:
+            log("[CACHE PREFLIGHT]")
+            cache_backed = 0
+            raw_only = 0
+            for i, snap in enumerate(snapshots, start=1):
+                src_name = snap.display_name
+                if is_cache_file(snap.path):
+                    cache_backed += 1
+                    mode = "?"
+                    y_lo = "?"
+                    y_hi = "?"
+                    try:
+                        h = read_cache_header(snap.path)
+                        mode = str(h.get("cache_mode", "?"))
+                        y_lo = str(h.get("y_min", "?"))
+                        y_hi = str(h.get("y_max", "?"))
+                    except Exception:
+                        pass
+                    log(
+                        f"  {i:02d}. {src_name} -> cache ({os.path.basename(snap.path)}) "
+                        f"mode={mode} y=[{y_lo},{y_hi}]"
+                    )
+                else:
+                    raw_only += 1
+                    raw_src = snap.raw_path or snap.path
+                    surf_path = sidecar_cache_path(raw_src, opt.dimension, CACHE_MODE_SURFACE)
+                    allb_path = sidecar_cache_path(raw_src, opt.dimension, CACHE_MODE_ALL_BLOCKS)
+                    surf_ok, surf_reason = _cache_mismatch_reason(
+                        surf_path, raw_src, CACHE_MODE_SURFACE, opt.dimension, opt.y_min, opt.y_max
+                    )
+                    allb_ok, allb_reason = _cache_mismatch_reason(
+                        allb_path, raw_src, CACHE_MODE_ALL_BLOCKS, opt.dimension, opt.y_min, opt.y_max
+                    )
+                    raw_dir = os.path.dirname(raw_src)
+                    raw_stem = snapshot_stem(raw_src).lower()
+
+                    # Capture current source signature used for cache matching.
+                    src_sig = None
+                    try:
+                        src_sig = build_source_signature(raw_src)
+                    except Exception:
+                        src_sig = None
+
+                    # Show all related cache files in the same folder for quick forensic checks.
+                    related_cache_files: List[str] = []
+                    try:
+                        for nm in sorted(os.listdir(raw_dir), key=lambda s: s.lower()):
+                            low = nm.lower()
+                            if not low.endswith(".wmtt4mc"):
+                                continue
+                            if raw_stem in snapshot_stem(os.path.join(raw_dir, nm)).lower():
+                                related_cache_files.append(nm)
+                    except Exception:
+                        pass
+
+                    log(
+                        f"  {i:02d}. {src_name} -> raw ({os.path.basename(raw_src)}) "
+                        f"cache_match(surface={str(bool(surf_ok)).lower()}:{surf_reason}, "
+                        f"all_blocks={str(bool(allb_ok)).lower()}:{allb_reason})"
+                    )
+                    log(f"      expected_surface={surf_path}")
+                    log(f"      expected_all_blocks={allb_path}")
+                    if related_cache_files:
+                        log(f"      related_cache_files={', '.join(related_cache_files)}")
+                    else:
+                        log("      related_cache_files=(none)")
+
+                    if src_sig is not None:
+                        log(
+                            "      source_signature="
+                            f"kind={src_sig.get('source_kind')} "
+                            f"name={src_sig.get('source_name')} "
+                            f"size={src_sig.get('source_size')} "
+                            f"mtime_ns={src_sig.get('source_mtime_ns')}"
+                        )
+
+                    def _log_cache_header_details(label: str, path: str) -> None:
+                        if not os.path.isfile(path):
+                            return
+                        try:
+                            h = read_cache_header(path)
+                            log(
+                                f"      {label}_header="
+                                f"mode={h.get('cache_mode')} "
+                                f"dimension={h.get('dimension')} "
+                                f"y=[{h.get('y_min')},{h.get('y_max')}] "
+                                f"source_kind={h.get('source_kind')} "
+                                f"source_name={h.get('source_name')} "
+                                f"source_size={h.get('source_size')} "
+                                f"source_mtime_ns={h.get('source_mtime_ns')}"
+                            )
+                        except Exception as exc:
+                            log(f"      {label}_header=read_error:{type(exc).__name__}")
+
+                    _log_cache_header_details("surface", surf_path)
+                    _log_cache_header_details("all_blocks", allb_path)
+            log(
+                f"  Summary: cache-backed={cache_backed}, raw-only={raw_only}, total={len(snapshots)}"
+            )
+            if raw_only > 0:
+                log(
+                    "  NOTE: raw-only snapshots can be much slower and are more likely to hit worker stalls "
+                    "than cache-backed snapshots."
+                )
+        except Exception as _cache_diag_exc:
+            log(f"[CACHE PREFLIGHT] Warning: {type(_cache_diag_exc).__name__}: {_cache_diag_exc}")
+
         log("-" * 60)
 
         rendered_frames: List[Tuple[int, str, Any]] = []  # (frame_no, frame_png, bounds)
         skipped: List[Tuple[str, str, str]] = []
 
         zip_times: List[float] = []
+        cache_zip_times: List[float] = []
         total_zips = len(snapshots)
+        total_raw_snapshots = sum(1 for s in snapshots if is_cache_file(s.path) is False)
+        total_cache_snapshots = max(0, total_zips - total_raw_snapshots)
         chronological = list(reversed(snapshots))  # oldest -> newest
         frame_no_by_path = {snap.path: i+1 for i, snap in enumerate(chronological)}
 
@@ -4686,10 +5386,11 @@ def worker_run(snapshots: List[SnapshotInput],
         RENDER_WEIGHT = 92.0
 
         # --- Block-based progress setup ---
-        # Estimate total blocks to render across all frames
+        # Estimate total blocks to render across all frames using cheap metadata scans.
         total_blocks = 0
         frame_block_counts = {}
-        # Use the actual crop area for all frames (or full world if not limited)
+        known_areas: List[int] = []
+        # Use crop area as an upper bound when crop is enabled.
         if opt.limit_enabled:
             x1 = int(min(opt.x_min, opt.x_max))
             x2 = int(max(opt.x_min, opt.x_max))
@@ -4700,10 +5401,43 @@ def worker_run(snapshots: List[SnapshotInput],
             x1, x2, z1, z2 = 0, 5119, 0, 5119
         width = abs(x2 - x1) + 1
         height = abs(z2 - z1) + 1
-        area = width * height
+        crop_area = width * height
+
         for snapshot in chronological:
-            frame_block_counts[snapshot.path] = area
-            total_blocks += area
+            est, est_source = estimate_snapshot_block_area_with_source(snapshot, opt.dimension)
+            if est is not None and est > 0:
+                if opt.limit_enabled:
+                    est = min(int(est), int(crop_area))
+                frame_block_counts[snapshot.path] = int(est)
+                known_areas.append(int(est))
+            try:
+                if est is not None and est > 0:
+                    log(f"[ESTIMATE] {snapshot.display_name}: source={est_source}, area≈{int(est):,} blocks")
+                else:
+                    log(f"[ESTIMATE] {snapshot.display_name}: source={est_source}, area=unknown (using default)")
+            except Exception:
+                pass
+
+        default_area = int(crop_area)
+        if (not opt.limit_enabled) and known_areas:
+            # Median known area is more stable than a hard-coded giant default.
+            s = sorted(known_areas)
+            default_area = int(s[len(s) // 2])
+        elif (not opt.limit_enabled) and (not known_areas):
+            default_area = 5120 * 5120
+
+        for snapshot in chronological:
+            if snapshot.path not in frame_block_counts:
+                frame_block_counts[snapshot.path] = int(default_area)
+            total_blocks += int(frame_block_counts[snapshot.path])
+
+        try:
+            log(
+                f"Block estimate: total≈{int(total_blocks):,} across {total_zips} frame(s) "
+                f"(known={len(known_areas)}, default={int(default_area):,}/frame)"
+            )
+        except Exception:
+            pass
         blocks_rendered = 0
         dynamic_area_refined = False
         job_start = time.time()
@@ -4738,10 +5472,15 @@ def worker_run(snapshots: List[SnapshotInput],
         )
         log(f"CPU cores: {cpu_count}, initial concurrent frames: {current_concurrency} (max: {max_concurrency})")
 
+        # Source-aware frame worker sizing: raw scans need more intra-frame workers
+        # than cache-backed snapshots.
+        raw_frame_workers = max(2, min(8, max(1, cpu_count // 2)))
+        log(f"Source-aware workers: cache={max(1, int(opt.workers))}, raw={raw_frame_workers}")
+
         # Shared state for concurrent rendering
         frame_lock = threading.Lock()
-        # in_flight_frames: future -> (zip_path, zip_i, start_time)
-        in_flight_frames: Dict[object, Tuple[str, int, float]] = {}
+        # in_flight_frames: future -> (snapshot, zip_i, start_time, source_label, stage_path)
+        in_flight_frames: Dict[object, Tuple[Any, int, float, str, str]] = {}
         pending_zips_queue: deque = deque([(snapshot, i+1) for i, snapshot in enumerate(snapshots)])
         
         last_cpu_check = time.time()
@@ -4758,26 +5497,120 @@ def worker_run(snapshots: List[SnapshotInput],
         stuck_frame_check_interval = 15.0  # seconds
         last_stuck_check = time.time()
         STUCK_FRAME_THRESHOLD = 2 * 60 * 60  # 2 hours in seconds
+        # Guard against long "98%" hangs: trigger early fallback when no future completes.
+        # We start conservative, then adapt once we have observed frame times.
+        NO_COMPLETION_STALL_THRESHOLD = 8 * 60  # baseline 8 minutes
+        last_completion_t = time.time()
+        force_early_shutdown = False
+        stalled_retry_items: List[Tuple[SnapshotInput, int, str]] = []
+        queued_retry_items: List[Tuple[SnapshotInput, int, str]] = []
+        RAW_INFLIGHT_LIMIT = 1
+        raw_zip_times: List[float] = []
 
         frame_executor = ProcessPoolExecutor(max_workers=max_concurrency)
+        _register_process_pool(frame_executor)
         try:
+            def _stage_file_path(zip_i: int, display_name: str) -> str:
+                return os.path.join(run_dir, f"frame_stage_{zip_i:03d}_{safe_filename(display_name)}.txt")
+
+            def _read_last_stage(stage_path: str) -> str:
+                try:
+                    with open(stage_path, "r", encoding="utf-8") as sf:
+                        line = sf.read().strip()
+                    if not line:
+                        return "unknown"
+                    parts = line.split("\t", 1)
+                    return parts[1] if len(parts) == 2 else line
+                except Exception:
+                    return "unknown"
+
+            def _stage_age_seconds(stage_path: str) -> Optional[float]:
+                try:
+                    st = os.stat(stage_path)
+                    return max(0.0, time.time() - float(st.st_mtime))
+                except Exception:
+                    return None
+
+            def _parse_stage_progress(stage: str) -> Optional[Tuple[int, int]]:
+                try:
+                    s = str(stage or "").strip().lower()
+                    if not s.startswith("raw.chunk_scan.progress"):
+                        return None
+                    tail = s.rsplit(" ", 1)[-1]
+                    parts = tail.split("/", 1)
+                    if len(parts) != 2:
+                        return None
+                    done = int(parts[0])
+                    total = int(parts[1])
+                    if total <= 0:
+                        return None
+                    return max(0, done), max(1, total)
+                except Exception:
+                    return None
+
             def submit_frame(snapshot: SnapshotInput, zip_i: int):
                 """Submit a single frame render task, return Future"""
                 name = snapshot.display_name
                 frame_no = frame_no_by_path.get(snapshot.path, zip_i)
                 frame_png = frame_png_by_path.get(snapshot.path, os.path.join(frames_dir, f"frame_{zip_i:04d}.png"))
                 debug_snapshot_path = os.path.join(run_dir, f"debug_block_ids_{zip_i:03d}_{safe_filename(name)}.txt")
-                log(f"[FRAME START] #{zip_i:03d}/{total_zips:03d} {name}")
+                stage_path = _stage_file_path(zip_i, name)
+                src_label = "cache" if is_cache_file(snapshot.path) else "raw"
+                opt_for_task = clone_render_options(opt)
+                if src_label == "raw":
+                    opt_for_task.workers = raw_frame_workers
+                else:
+                    opt_for_task.workers = max(1, int(opt.workers))
+                log(
+                    f"[FRAME START] #{zip_i:03d}/{total_zips:03d} {name} "
+                    f"[source={src_label}, frame_workers={opt_for_task.workers}]"
+                )
                 
                 future = frame_executor.submit(
                     _render_frame_task,
                     snapshot, zip_i, total_zips, frame_no, frame_png,
-                    debug_snapshot_path, run_dir, frames_dir, opt
+                    debug_snapshot_path, run_dir, frames_dir, opt_for_task, None, stage_path
                 )
                 start_time = time.time()
                 with frame_lock:
-                    in_flight_frames[future] = (snapshot, zip_i, start_time)
+                    in_flight_frames[future] = (snapshot, zip_i, start_time, src_label, stage_path)
                 return future
+
+            def _source_label(snapshot: SnapshotInput) -> str:
+                return "cache" if is_cache_file(snapshot.path) else "raw"
+
+            def _inflight_counts() -> Tuple[int, int]:
+                with frame_lock:
+                    vals = list(in_flight_frames.values())
+                active = sum(1 for (_s, _zi, _st, _src, _stage) in vals)
+                raw_active = sum(1 for (_s, _zi, _st, src, _stage) in vals if str(src).lower() == "raw")
+                return active, raw_active
+
+            def _can_submit_snapshot(snapshot: SnapshotInput) -> bool:
+                _active, raw_active = _inflight_counts()
+                if _source_label(snapshot) == "raw" and raw_active >= RAW_INFLIGHT_LIMIT:
+                    return False
+                return True
+
+            def _try_submit_more() -> None:
+                """Submit more work without exceeding concurrency or raw inflight cap.
+
+                We rotate through the queue so cache-backed snapshots can start even if
+                a raw snapshot at the front is temporarily blocked by RAW_INFLIGHT_LIMIT.
+                """
+                if not pending_zips_queue:
+                    return
+                attempts = len(pending_zips_queue)
+                while attempts > 0:
+                    active, _raw_active = _inflight_counts()
+                    if active >= current_concurrency:
+                        break
+                    snapshot, zip_i = pending_zips_queue.popleft()
+                    if _can_submit_snapshot(snapshot):
+                        submitted_futures.append(submit_frame(snapshot, zip_i))
+                    else:
+                        pending_zips_queue.append((snapshot, zip_i))
+                    attempts -= 1
 
             def trim_to_target_concurrency() -> None:
                 # Cancel not-yet-running futures beyond current target and re-queue them.
@@ -4787,7 +5620,7 @@ def worker_run(snapshots: List[SnapshotInput],
                 to_trim = max(0, active_count - current_concurrency)
                 if to_trim <= 0:
                     return
-                for fut, (snapshot, zip_i, _start) in reversed(futures_snapshot):
+                for fut, (snapshot, zip_i, _start, _src, _stage) in reversed(futures_snapshot):
                     if to_trim <= 0:
                         break
                     if fut.done() or fut.running():
@@ -4804,18 +5637,19 @@ def worker_run(snapshots: List[SnapshotInput],
 
             # Remove hard concurrency cap: allow as many as CPU and RAM allow
             submitted_futures = []
-            last_eta_display_t: Optional[float] = None
             displayed_eta_str: str = "--"
-            while len(in_flight_frames) < current_concurrency and pending_zips_queue:
-                snapshot, zip_i = pending_zips_queue.popleft()
-                submitted_futures.append(submit_frame(snapshot, zip_i))
+            _try_submit_more()
 
             # Process as frames complete and dynamically submit more
             last_block_update = time.time()
             while submitted_futures or pending_zips_queue:
                 if cancel_event.is_set():
                     log("-" * 60)
-                    log("Cancelled.")
+                    stop_mode = str((stop_control or {}).get("mode", "partial_gif")).strip().lower()
+                    if stop_mode == "immediate":
+                        log("Stop requested (immediate). Ending render now; GIF build will be skipped.")
+                    else:
+                        log("Stop requested (partial GIF). Ending render and building GIF from completed frames.")
                     break
 
                 # Check CPU usage every N seconds and adjust concurrency
@@ -4850,23 +5684,105 @@ def worker_run(snapshots: List[SnapshotInput],
                 if (now - last_stuck_check) > stuck_frame_check_interval:
                     stuck_frames = []
                     with frame_lock:
-                        for future, (zip_path, zip_i, start_time) in in_flight_frames.items():
+                        for future, (snapshot_obj, zip_i, start_time, src_label, stage_path) in in_flight_frames.items():
                             if future.done():
                                 continue
                             elapsed = now - start_time
                             if elapsed > STUCK_FRAME_THRESHOLD:
-                                stuck_frames.append((zip_path, zip_i, elapsed))
+                                nm = getattr(snapshot_obj, "display_name", str(snapshot_obj))
+                                stuck_frames.append((nm, zip_i, elapsed, src_label, stage_path))
                     with frame_lock:
                         running_snapshot = [v for f, v in in_flight_frames.items() if not f.done()]
                     if running_snapshot:
-                        oldest = max(now - float(s) for (_zp, _zi, s) in running_snapshot)
+                        oldest = max(now - float(s) for (_snap, _zi, s, _src, _stage) in running_snapshot)
+                        has_raw_inflight = any((str(src).lower() == "raw") for (_snap, _zi, _s, src, _stage) in running_snapshot)
                         status_line = f"{len(running_snapshot)} in-flight | {len(pending_zips_queue)} queued"
-                        log(f"[HEARTBEAT] {status_line} | oldest frame age={oldest:.0f}s")
+                        stage_labels = sorted({
+                            _read_last_stage(stage_path)
+                            for (_snap, _zi, _s, _src, stage_path) in running_snapshot
+                        })
+                        log(f"[HEARTBEAT] {status_line} | oldest frame age={oldest:.0f}s | stages={', '.join(stage_labels)}")
+
+                        if zip_times:
+                            # Use max observed frame time (not mean) so one fast cached frame
+                            # does not under-estimate timeout for slow raw frames.
+                            ref_frame_s = max(1.0, float(max(zip_times)))
+                            if has_raw_inflight:
+                                # Raw overworld frames can be vastly slower than cache-backed frames.
+                                # Prefer observed raw times; otherwise use a conservative baseline.
+                                if raw_zip_times:
+                                    ref_raw_s = max(1.0, float(max(raw_zip_times)))
+                                    stall_threshold_now = max(45 * 60, min(3 * 60 * 60, int(3.0 * ref_raw_s)))
+                                else:
+                                    # No prior raw timing yet — allow up to 3 hours before declaring stall.
+                                    stall_threshold_now = 3 * 60 * 60
+                            else:
+                                stall_threshold_now = max(4 * 60, min(12 * 60, int(4.0 * ref_frame_s)))
+                        else:
+                            stall_threshold_now = NO_COMPLETION_STALL_THRESHOLD
+
+                        no_completion_age = now - last_completion_t
+                        # If raw in-flight stage files are still being updated recently,
+                        # treat that as forward progress and defer stall handling.
+                        # Use a 300-second window to tolerate slow-patch chunk scans that
+                        # can go quiet for 100-120 s between updates.
+                        if has_raw_inflight:
+                            recent_raw_progress = False
+                            for (_snap, _zi, _s, src, stage_path) in running_snapshot:
+                                if str(src).lower() != "raw":
+                                    continue
+                                age = _stage_age_seconds(stage_path)
+                                if age is not None and age <= 300.0:
+                                    recent_raw_progress = True
+                                    break
+                            if recent_raw_progress:
+                                last_stuck_check = now
+                                continue
+                        if no_completion_age > stall_threshold_now:
+                            force_early_shutdown = True
+                            salvaged_now = 0
+                            with frame_lock:
+                                staged_retry: List[Tuple[SnapshotInput, int, str]] = []
+                                for _fut, (s, zi, _st, src, _stage) in in_flight_frames.items():
+                                    if s is None:
+                                        continue
+                                    if _fut.done():
+                                        continue
+                                    fno = frame_no_by_path.get(s.path, zi)
+                                    fpng = frame_png_by_path.get(s.path, os.path.join(frames_dir, f"frame_{zi:04d}.png"))
+                                    try:
+                                        if os.path.isfile(fpng) and os.path.getsize(fpng) > 0:
+                                            rendered_frames.append((fno, fpng, None))
+                                            blocks_rendered += frame_block_counts.get(s.path, 1)
+                                            salvaged_now += 1
+                                            log(f"[STALL RECOVER] Using already-written frame: {os.path.basename(fpng)}")
+                                            continue
+                                    except Exception:
+                                        pass
+                                    staged_retry.append((s, zi, src))
+                                stalled_retry_items = staged_retry
+                            # Also preserve queued work so it can be retried after the stalled worker is torn down.
+                            queued_retry_items = [
+                                (s, zi, _source_label(s)) for (s, zi) in list(pending_zips_queue)
+                            ]
+                            log(
+                                "[STALL] No frame has completed for "
+                                f"{no_completion_age:.0f}s (threshold={stall_threshold_now}s) "
+                                f"with {len(running_snapshot)} in-flight. "
+                                "Proceeding with completed frames and skipping stalled workers."
+                            )
+                            if salvaged_now > 0:
+                                log(f"[STALL RECOVER] Salvaged {salvaged_now} in-flight frame(s) from existing PNG output.")
+                            status(
+                                "Frame workers stalled; proceeding with completed frames.",
+                                "Building GIF from finished frames only."
+                            )
+                            break
                     if stuck_frames:
-                        for zip_path, zip_i, elapsed in stuck_frames:
-                            name = os.path.basename(zip_path)
-                            log(f"WARNING: Frame {zip_i} ({name}) has been running for {elapsed/3600:.2f} hours. Possible stuck worker.")
-                            status(f"Frame {zip_i} appears stuck", f"{name} running {elapsed/3600:.2f}h")
+                        for name, zip_i, elapsed, src, stage_path in stuck_frames:
+                            stage_name = _read_last_stage(stage_path)
+                            log(f"WARNING: Frame {zip_i} ({name}, source={src}) has been running for {elapsed/3600:.2f} hours. Possible stuck worker.")
+                            status(f"Frame {zip_i} appears stuck", f"{name} (source={src}) stage={stage_name} running {elapsed/3600:.2f}h")
                     last_stuck_check = now
 
                 # Wait for next frame to complete with a short timeout so we can poll CPU and submit more
@@ -4875,8 +5791,9 @@ def worker_run(snapshots: List[SnapshotInput],
                     submitted_futures.remove(completed_future)
                     try:
                         success, bounds, name, error_reason, error_log_path = completed_future.result()
+                        last_completion_t = time.time()
                         with frame_lock:
-                            snapshot, zip_i, start_time = in_flight_frames.pop(completed_future, (None, None, None))
+                            snapshot, zip_i, start_time, _src, _stage = in_flight_frames.pop(completed_future, (None, None, None, "unknown", ""))
                         if success:
                             if snapshot:
                                 frame_no = frame_no_by_path.get(snapshot.path, zip_i)
@@ -4884,20 +5801,14 @@ def worker_run(snapshots: List[SnapshotInput],
                                 rendered_frames.append((frame_no, frame_png, bounds))
                                 elapsed = max(0.0, time.time() - float(start_time or time.time()))
                                 zip_times.append(elapsed)
+                                if str(_src).lower() == "raw":
+                                    raw_zip_times.append(elapsed)
+                                else:
+                                    cache_zip_times.append(elapsed)
                                 log(f"[FRAME DONE] #{zip_i:03d}/{total_zips:03d} {name} in {elapsed:.1f}s")
                                 if (not opt.limit_enabled) and (not dynamic_area_refined) and bounds is not None:
-                                    try:
-                                        cols_colored = int(bounds[6])
-                                        cols_air = int(bounds[7])
-                                        refined_area = max(1, cols_colored + cols_air)
-                                        area = refined_area
-                                        total_blocks = refined_area * total_zips
-                                        for k in frame_block_counts.keys():
-                                            frame_block_counts[k] = refined_area
-                                        dynamic_area_refined = True
-                                        log(f"Refined pixel estimate from first frame: {refined_area:,} pixels/frame")
-                                    except Exception:
-                                        pass
+                                    # Keep per-frame estimates stable to avoid large progress/ETA jumps.
+                                    dynamic_area_refined = True
                                 # Add blocks for this frame
                                 blocks_rendered += frame_block_counts.get(snapshot.path, 1)
                                 last_error_reason = ""
@@ -4925,20 +5836,27 @@ def worker_run(snapshots: List[SnapshotInput],
                     except Exception as e:
                         log(f"Error collecting frame result: {e}")
                         with frame_lock:
-                            in_flight_frames.pop(completed_future, None)
+                            crashed_info = in_flight_frames.pop(completed_future, None)
+                        # Count the crashed frame as skipped so it is not silently dropped.
+                        # Without this, a BrokenProcessPool or other exception leaves the
+                        # frame neither rendered nor skipped, and the stall detector must
+                        # wait 8+ minutes before recovering.
+                        if crashed_info is not None:
+                            crashed_snapshot, crashed_zip_i, _, crashed_src, _ = crashed_info
+                            crashed_name = getattr(crashed_snapshot, "display_name", str(crashed_snapshot)) if crashed_snapshot else "unknown"
+                            skipped.append((crashed_name, f"Worker exception: {type(e).__name__}: {e}", ""))
+                            log(f"[FRAME CRASH] #{crashed_zip_i} {crashed_name}: {type(e).__name__}: {e}")
                 except TimeoutError:
                     # No frames completed in timeout; keep looping to check CPU and submit more
                     pass
 
                 # Try to submit more frames if we're below target concurrency
-                while len(in_flight_frames) < current_concurrency and pending_zips_queue:
-                    if cancel_event.is_set():
-                        break
-                    snapshot, zip_i = pending_zips_queue.popleft()
-                    submitted_futures.append(submit_frame(snapshot, zip_i))
+                if not cancel_event.is_set():
+                    _try_submit_more()
 
                 # Update overall progress (block-based)
-                completed = len(rendered_frames) + len(skipped)
+                rendered_count = len(rendered_frames)
+                finished_count = rendered_count + len(skipped)
                 with frame_lock:
                     in_flight = sum(1 for f in in_flight_frames.keys() if not f.done())
                 pending = len(pending_zips_queue)
@@ -4952,26 +5870,87 @@ def worker_run(snapshots: List[SnapshotInput],
                 avg_frame_seconds = (sum(zip_times) / len(zip_times)) if zip_times else None
                 with frame_lock:
                     inflight_snapshot = list(in_flight_frames.values())
+                inflight_raw = sum(1 for _snapshot, _zip_i, _start, src, _stage in inflight_snapshot if str(src).lower() == "raw")
+                inflight_cache = max(0, len(inflight_snapshot) - inflight_raw)
+                pending_raw = sum(1 for snap, _zip_i in pending_zips_queue if _source_label(snap) == "raw")
+                pending_cache = max(0, len(pending_zips_queue) - pending_raw)
                 inflight_frame_progress = 0.0
-                for _snapshot, _zip_i, start_time in inflight_snapshot:
+                raw_live_remaining_seconds = 0.0
+                raw_live_chunk_rates: List[float] = []
+                pending_raw_chunk_est = 0.0
+                for _snapshot, _zip_i, start_time, _src, _stage in inflight_snapshot:
                     elapsed = max(0.0, now - float(start_time or now))
                     denom = float(avg_frame_seconds) if (avg_frame_seconds and avg_frame_seconds > 1.0) else startup_frame_eta_guess_s
                     inflight_frame_progress += min(0.95, max(0.01, elapsed / max(1.0, denom)))
 
-                effective_done_frames = min(float(total_zips), float(completed) + inflight_frame_progress)
-                frac_done = effective_done_frames / max(1.0, float(total_zips))
-                percent = int(round(frac_done * 100))
+                    if str(_src).lower() == "raw":
+                        parsed = _parse_stage_progress(_read_last_stage(_stage))
+                        if parsed is not None:
+                            done_chunks, total_chunks = parsed
+                            if done_chunks > 100 and elapsed > 10.0:
+                                rate = float(done_chunks) / max(1.0, elapsed)
+                                if rate > 0.01:
+                                    raw_live_chunk_rates.append(rate)
+                                    remaining_chunks = max(0, total_chunks - done_chunks)
+                                    raw_live_remaining_seconds += float(remaining_chunks) / rate
+
+                for snap, _zip_i in pending_zips_queue:
+                    if _source_label(snap) != "raw":
+                        continue
+                    pending_raw_chunk_est += max(1.0, float(frame_block_counts.get(snap.path, 256)) / 256.0)
+
+                effective_done_frames = min(float(total_zips), float(rendered_count) + inflight_frame_progress)
+                frame_frac_done = effective_done_frames / max(1.0, float(total_zips))
+
+                # Block-based completion: completed frames only (no in-flight inflation).
+                blocks_done = max(0.0, float(blocks_rendered))
+                blocks_total = max(1.0, float(total_blocks))
+                block_frac_done = min(1.0, blocks_done / blocks_total)
+                block_percent = int(round(block_frac_done * 100.0))
                 eta_str = "--"
                 eta_est = None
                 
-                # Improved ETA logic with different smoothing for startup vs steady-state
-                if avg_frame_seconds is not None and completed >= 1:
-                    remaining_frame_equiv = max(0.0, float(total_zips) - effective_done_frames)
+                # Improved ETA logic with source-aware timing so fast cache frames do not
+                # unrealistically collapse ETA while long raw frames are still pending.
+                if finished_count >= 1:
+                    cache_avg_seconds = (sum(cache_zip_times) / len(cache_zip_times)) if cache_zip_times else None
+                    raw_avg_seconds = (sum(raw_zip_times) / len(raw_zip_times)) if raw_zip_times else None
+
+                    if cache_avg_seconds is None:
+                        # No completed cache frame yet; use a conservative but responsive default.
+                        cache_avg_seconds = min(60.0, float(avg_frame_seconds or startup_frame_eta_guess_s))
+
+                    if raw_avg_seconds is None:
+                        raw_elapsed_now = [
+                            max(0.0, now - float(start_time or now))
+                            for _snapshot, _zip_i, start_time, src, _stage in inflight_snapshot
+                            if str(src).lower() == "raw"
+                        ]
+                        if raw_live_chunk_rates:
+                            med_rate = sorted(raw_live_chunk_rates)[len(raw_live_chunk_rates) // 2]
+                            if med_rate > 0.01:
+                                raw_live_remaining_seconds += pending_raw_chunk_est / med_rate
+                                raw_avg_seconds = max(60.0, raw_live_remaining_seconds / max(1.0, float(max(1, inflight_raw + pending_raw))))
+                            else:
+                                raw_avg_seconds = startup_frame_eta_guess_s * 4.0
+                        elif raw_elapsed_now:
+                            # Bootstrap raw ETA from current in-flight raw duration, biased high
+                            # until at least one raw frame completes.
+                            raw_avg_seconds = max(startup_frame_eta_guess_s * 4.0, max(raw_elapsed_now) * 1.5)
+                        elif (pending_raw + inflight_raw) > 0:
+                            raw_avg_seconds = startup_frame_eta_guess_s * 4.0
+                        else:
+                            raw_avg_seconds = cache_avg_seconds
+
+                    remaining_frame_seconds = (
+                        float(pending_cache + inflight_cache) * float(cache_avg_seconds)
+                        + float(pending_raw + inflight_raw) * float(raw_avg_seconds)
+                    )
                     effective_parallel = max(1.0, float(in_flight))
-                    eta_est = (remaining_frame_equiv * float(avg_frame_seconds)) / effective_parallel
+                    eta_est = remaining_frame_seconds / effective_parallel
                     
                     # Use appropriate smoother based on progression
-                    if completed <= 2:
+                    if finished_count <= 2:
                         # During startup (first 1-2 frames), use quick-response smoother
                         first_frame_eta_smoother.add(eta_est)
                         smooth_eta = first_frame_eta_smoother.value()
@@ -4985,9 +5964,9 @@ def worker_run(snapshots: List[SnapshotInput],
                         eta_val = overall_eta_smoother.value()
                     else:
                         eta_val = eta_est
-                elif frac_done > 0.02:
+                elif block_frac_done > 0.005:
                     elapsed_total = max(0.001, now - job_start)
-                    eta_est = estimate_remaining_seconds(elapsed_total, frac_done)
+                    eta_est = estimate_remaining_seconds(elapsed_total, block_frac_done)
                     if eta_est is not None:
                         overall_eta_smoother.add(eta_est)
                         eta_val = overall_eta_smoother.value()
@@ -4997,29 +5976,108 @@ def worker_run(snapshots: List[SnapshotInput],
                     eta_val = None
 
                 if eta_val is not None:
-                    now_d = time.time()
-                    if last_eta_display_t is None or (now_d - last_eta_display_t) >= 5.0:
-                        displayed_eta_str = fmt_seconds(eta_val)
-                        last_eta_display_t = now_d
+                    displayed_eta_str = fmt_seconds(eta_val)
                 status(
-                    f"Frames rendered: {completed}/{total_zips} | {percent}% complete | ETA: {displayed_eta_str}",
+                    f"Frames rendered: {len(rendered_frames)}/{total_zips} | Block progress: {block_percent}% complete | ETA: {displayed_eta_str}",
                     f"{in_flight} in-flight | {pending} queued"
                 )
 
-                progress(frac_done * RENDER_WEIGHT)
+                progress(block_frac_done * RENDER_WEIGHT)
                 if repeated_error_abort:
                     break
         finally:
-            if cancel_event.is_set():
+            _unregister_process_pool(frame_executor)
+            if cancel_event.is_set() or force_early_shutdown:
                 try:
                     frame_executor.shutdown(wait=False, cancel_futures=True)
                 except Exception:
                     pass
+                _force_terminate_pool(frame_executor, "main")
             else:
                 try:
                     frame_executor.shutdown(wait=True)
                 except Exception:
                     pass
+
+        # If we bailed out due stalled workers, retry those specific frames serially
+        # in the parent process so we can recover from child-process deadlocks.
+        retry_items: List[Tuple[SnapshotInput, int, str]] = []
+        if force_early_shutdown:
+            retry_items.extend(stalled_retry_items)
+            retry_items.extend(queued_retry_items)
+
+        if retry_items and (not cancel_event.is_set()):
+            log("-" * 60)
+            log(f"[STALL] Retrying {len(retry_items)} frame(s) sequentially after stall...")
+            for snapshot, zip_i, src_label in retry_items:
+                name = snapshot.display_name
+                frame_no = frame_no_by_path.get(snapshot.path, zip_i)
+                frame_png = frame_png_by_path.get(snapshot.path, os.path.join(frames_dir, f"frame_{zip_i:04d}.png"))
+                debug_snapshot_path = os.path.join(run_dir, f"debug_block_ids_{zip_i:03d}_{safe_filename(name)}.txt")
+                stage_path = _stage_file_path(zip_i, name)
+                log(f"[FRAME RETRY] #{zip_i:03d}/{total_zips:03d} {name} [source={src_label}]")
+
+                # Hard timeout per retry so a single stuck frame cannot hang the whole run.
+                # Raw frames restart the full chunk scan from scratch, so allow 3 hours.
+                retry_timeout_s = (3 * 60 * 60) if str(src_label).lower() == "raw" else (10 * 60)
+                retry_executor = ProcessPoolExecutor(max_workers=1)
+                _register_process_pool(retry_executor)
+                try:
+                    retry_opt = clone_render_options(opt)
+                    if str(src_label).lower() == "raw":
+                        retry_opt.workers = raw_frame_workers
+                    else:
+                        retry_opt.workers = max(1, int(opt.workers))
+                    retry_fut = retry_executor.submit(
+                        _render_frame_task,
+                        snapshot,
+                        zip_i,
+                        total_zips,
+                        frame_no,
+                        frame_png,
+                        debug_snapshot_path,
+                        run_dir,
+                        frames_dir,
+                        retry_opt,
+                        None,
+                        stage_path,
+                    )
+                    success, bounds, _nm, error_reason, error_log_path = retry_fut.result(timeout=retry_timeout_s)
+                except TimeoutError:
+                    # If the frame PNG exists, treat as success with unknown bounds.
+                    # This covers cases where rendering finished but worker cleanup hung.
+                    if os.path.isfile(frame_png) and os.path.getsize(frame_png) > 0:
+                        success, bounds = True, None
+                        error_reason = ""
+                        error_log_path = ""
+                        log(f"[FRAME RETRY SALVAGE] Timeout but frame file exists, accepting output: {os.path.basename(frame_png)}")
+                    else:
+                        success, bounds = False, None
+                        stage_name = _read_last_stage(stage_path)
+                        error_reason = f"Retry timed out after {retry_timeout_s}s (last stage: {stage_name})"
+                        error_log_path = ""
+                except Exception as _retry_exc:
+                    success, bounds = False, None
+                    error_reason = f"Retry worker error: {type(_retry_exc).__name__}: {_retry_exc}"
+                    error_log_path = ""
+                finally:
+                    _unregister_process_pool(retry_executor)
+                    try:
+                        retry_executor.shutdown(wait=False, cancel_futures=True)
+                    except Exception:
+                        pass
+                    _force_terminate_pool(retry_executor, f"retry #{zip_i}")
+
+                if success:
+                    rendered_frames.append((frame_no, frame_png, bounds))
+                    blocks_rendered += frame_block_counts.get(snapshot.path, 1)
+                    log(f"[FRAME RETRY DONE] #{zip_i:03d}/{total_zips:03d} {name}")
+                else:
+                    reason = error_reason or "Retry failed"
+                    skipped.append((name, reason, error_log_path or ""))
+                    log(f"[FRAME RETRY FAILED] {name}: {reason}")
+                    if error_log_path:
+                        log(f"  error log: {error_log_path}")
 
         run_elapsed = max(0.0, time.time() - job_start)
         _record_auto_tuner_result(
@@ -5034,7 +6092,40 @@ def worker_run(snapshots: List[SnapshotInput],
             failed=len(skipped),
         )
 
+        stop_mode = str((stop_control or {}).get("mode", "partial_gif")).strip().lower()
+
+        if cancel_event.is_set() and stop_mode == "immediate":
+            log("-" * 60)
+            log("Stopped immediately by user. Skipping GIF build.")
+            run_log.close()
+            msgq.put(("done", {
+                "run_dir": run_dir,
+                "frames_dir": frames_dir,
+                "gif": "",
+                "skipped": len(skipped),
+                "skipped_report": None,
+                "unknown_blocks_json": None,
+                "cancelled": True,
+                "stopped_mode": "immediate",
+            }))
+            return
+
         if not rendered_frames:
+            if cancel_event.is_set():
+                log("-" * 60)
+                log("Stopped by user before any frame completed.")
+                run_log.close()
+                msgq.put(("done", {
+                    "run_dir": run_dir,
+                    "frames_dir": frames_dir,
+                    "gif": "",
+                    "skipped": len(skipped),
+                    "skipped_report": None,
+                    "unknown_blocks_json": None,
+                    "cancelled": True,
+                    "stopped_mode": "partial_gif",
+                }))
+                return
             # Collect Y-range info from all cache files to give an actionable advisory.
             y_range_advisory = ""
             try:
@@ -5070,6 +6161,8 @@ def worker_run(snapshots: List[SnapshotInput],
             run_log.close()
             return
 
+        if cancel_event.is_set():
+            log("Stop requested: building GIF from completed frames.")
         status("Building animated GIF…", "")
         log("-" * 60)
         log(f"Building GIF from {len(rendered_frames)} frames…")
@@ -5137,6 +6230,14 @@ def worker_run(snapshots: List[SnapshotInput],
         
         run_log.close()
 
+        if skipped:
+            msgq.put(("error",
+                f"Timelapse failed: {len(skipped)} of {total_zips} frame(s) failed to render. "
+                f"A partial GIF was created at: {out_gif}\\n"
+                f"See skip report for details: {skipped_report}"
+            ))
+            return
+
         msgq.put(("done", {
             "run_dir": run_dir,
             "frames_dir": frames_dir,
@@ -5155,7 +6256,9 @@ def _render_frame_task(
     snapshot: SnapshotInput, zip_i: int, total_zips: int,
     frame_no: int, frame_png: str,
     debug_snapshot_path: str, run_dir: str, frames_dir: str,
-    opt: RenderOptions
+    opt: RenderOptions,
+    cancel_event: Any = None,
+    stage_path: Optional[str] = None,
 ) -> Tuple[bool, Optional[Tuple], str, str, str]:
     """
     Render a single frame in a worker thread. Called by concurrent executor.
@@ -5163,7 +6266,30 @@ def _render_frame_task(
     """
     t0 = time.time()
     name = snapshot.display_name
+    _last_stage_progress_emit = 0.0
+
+    def _write_stage(stage: str) -> None:
+        if not stage_path:
+            return
+        try:
+            with open(stage_path, "w", encoding="utf-8") as sf:
+                sf.write(f"{time.time():.3f}\t{stage}\n")
+        except Exception:
+            pass
+
+    def _progress_stage(done: int, total: int, _pct: float) -> None:
+        nonlocal _last_stage_progress_emit
+        if total <= 0:
+            return
+        now = time.time()
+        # Throttle stage updates so we avoid excessive file writes.
+        if done != total and (now - _last_stage_progress_emit) < 8.0:
+            return
+        _last_stage_progress_emit = now
+        _write_stage(f"raw.chunk_scan.progress {int(done)}/{int(total)}")
+
     try:
+        _write_stage("frame.start")
         header = (
             f"Snapshot: {name}\n"
             f"Source path: {snapshot.path}\n"
@@ -5176,28 +6302,37 @@ def _render_frame_task(
             f"Time: {time.strftime('%Y-%m-%d %H:%M:%S')}\n"
             f"NOTE: Unknown IDs are rendered gray and listed in this file.\n"
         )
-        opt_for_frame = RenderOptions(**{**opt.__dict__})
+        opt_for_frame = clone_render_options(opt)
         opt_for_frame.workers = max(1, int(opt.workers))
         bounds = render_snapshot_input(
             snapshot,
             frame_png,
             opt_for_frame,
             log_cb=None,
-            progress_cb=None,
-            cancel_event=None,
+            progress_cb=_progress_stage,
+            cancel_event=cancel_event,
             debug_snapshot_path=debug_snapshot_path,
             debug_context_header=header,
+            stage_cb=_write_stage,
         )
         if not os.path.isfile(frame_png):
             raise RuntimeError(f"Frame image was not written: {frame_png}")
+        _write_stage("frame.done")
         return (True, bounds, name, "", "")
 
     except Exception as e:
+        _write_stage(f"frame.error {type(e).__name__}")
         # Write error details to a global error log for debugging
         global_error_log = os.path.join(run_dir if 'run_dir' in locals() else '.', f"frame_global_error_{zip_i:03d}_{name}.log")
         with open(global_error_log, "w", encoding="utf-8") as errf:
             errf.write(f"Frame failed: {name}\n")
             errf.write(f"Output path: {frame_png}\n")
+            if stage_path:
+                try:
+                    with open(stage_path, "r", encoding="utf-8") as sf:
+                        errf.write(f"Last stage: {sf.read().strip()}\n")
+                except Exception:
+                    pass
             errf.write(f"Exception: {type(e).__name__}: {e}\n")
             errf.write(traceback.format_exc())
         return (False, None, name, f"{type(e).__name__}: {e}", global_error_log)
@@ -5223,6 +6358,49 @@ def _cache_matches_requested_settings(cache_path: str, source_path: str, cache_m
     )
 
 
+def _cache_mismatch_reason(
+    cache_path: str,
+    source_path: str,
+    cache_mode: str,
+    dimension: str,
+    y_min: int,
+    y_max: int,
+) -> Tuple[bool, str]:
+    """Return (is_match, reason) for cache preflight diagnostics."""
+    if not os.path.isfile(cache_path):
+        return False, "missing"
+
+    try:
+        header = read_cache_header(cache_path)
+    except Exception as exc:
+        return False, f"header_error:{type(exc).__name__}"
+
+    try:
+        sig = build_source_signature(source_path)
+    except Exception as exc:
+        return False, f"source_sig_error:{type(exc).__name__}"
+
+    for key in ("source_kind", "source_name", "source_size", "source_mtime_ns"):
+        hv = header.get(key)
+        sv = sig.get(key)
+        if hv != sv:
+            return False, f"source_mismatch:{key}"
+
+    mode_h = str(header.get("cache_mode", ""))
+    dim_h = str(header.get("dimension", ""))
+    y0_h = int(header.get("y_min", 0))
+    y1_h = int(header.get("y_max", 0))
+
+    if mode_h != str(cache_mode):
+        return False, f"mode_mismatch:{mode_h}->{cache_mode}"
+    if dim_h != str(dimension):
+        return False, f"dimension_mismatch:{dim_h}->{dimension}"
+    if y0_h != int(y_min) or y1_h != int(y_max):
+        return False, f"y_mismatch:[{y0_h},{y1_h}]->[{y_min},{y_max}]"
+
+    return True, "match"
+
+
 def cache_build_worker(
     snapshots: List[SnapshotInput],
     cache_mode: str,
@@ -5234,7 +6412,6 @@ def cache_build_worker(
 ):
     """Build caches for *snapshots* across one or more *dimensions*.
 
-    *dimensions* may be a single string (backwards-compatible) or a list.
     Each dimension produces its own sidecar file, e.g.
     ``World_overworld.wmtt4mc`` and ``World_nether.wmtt4mc``.
     A single ``cache_done`` message is emitted when all dimensions finish.
@@ -5541,7 +6718,7 @@ def debug_one_chunk_worker(
             status(f"Debug: rendering chunk ({cx},{cz})…", "")
             progress(30.0)
 
-            opt2 = RenderOptions(**{**opt.__dict__})
+            opt2 = clone_render_options(opt)
             opt2.debug_block_samples = True
 
             render_one_chunk_png(
@@ -5580,6 +6757,203 @@ def debug_one_chunk_worker(
     except Exception:
         msgq.put(("error", traceback.format_exc()))
 
+
+
+def preflight_report_worker(
+    folder: str,
+    out_dir: str,
+    opt: RenderOptions,
+    output_cache_mode: str,
+    msgq: "queue.Queue[tuple]",
+    cancel_event: threading.Event,
+):
+    """Generate a non-render preflight report describing discovered inputs and planned source usage."""
+    try:
+        run_id = time.strftime("%Y%m%d-%H%M%S")
+        report_dir = os.path.join(out_dir, f"preflight_{run_id}")
+        os.makedirs(report_dir, exist_ok=True)
+        report_txt = os.path.join(report_dir, "preflight_report.txt")
+        report_json = os.path.join(report_dir, "preflight_report.json")
+
+        logf = open(report_txt, "a", encoding="utf-8", buffering=1)
+
+        def log(msg: str):
+            msgq.put(("log", msg))
+            try:
+                logf.write(str(msg).replace("\\r\\n", "\n").replace("\\n", "\n") + "\n")
+            except Exception:
+                pass
+
+        def status(line1: str, line2: str = ""):
+            msgq.put(("status", (line1, line2)))
+
+        def progress(v: float):
+            msgq.put(("progress", v))
+
+        status("Running preflight report…", "Scanning backups and cache files.")
+        progress(5.0)
+
+        log(f"{APP_NAME} v{APP_VERSION} (build {APP_BUILD})")
+        log(f"Preflight folder: {report_dir}")
+        log(f"Input folder: {folder}")
+        log(f"Output folder: {out_dir}")
+        log(f"Dimension: {opt.dimension} | y=[{opt.y_min},{opt.y_max}]")
+        log(f"Target: {opt.target_preset}")
+        log(f"Output cache mode: {output_cache_mode or '(unspecified)'}")
+        if opt.limit_enabled:
+            log(f"Crop: enabled x=[{opt.x_min},{opt.x_max}] z=[{opt.z_min},{opt.z_max}]")
+        else:
+            log("Crop: disabled")
+        log("-" * 60)
+
+        if cancel_event and cancel_event.is_set():
+            raise CancelledError("Cancelled before discovery.")
+
+        diag_lines: List[str] = []
+
+        def _diag_log(msg: str) -> None:
+            text = str(msg)
+            diag_lines.append(text)
+            log(text)
+
+        snapshots, diag = discover_with_diagnostics(
+            folder,
+            log_cb=_diag_log,
+            dimension=opt.dimension,
+        )
+        progress(35.0)
+
+        if cancel_event and cancel_event.is_set():
+            raise CancelledError("Cancelled during discovery.")
+
+        plan_items: List[Dict[str, Any]] = []
+        log("[PREFLIGHT PLAN]")
+        for i, snap in enumerate(snapshots, start=1):
+            item: Dict[str, Any] = {
+                "index": i,
+                "display_name": snap.display_name,
+                "kind": snap.kind,
+                "path": snap.path,
+                "raw_path": snap.raw_path,
+                "cache_path": snap.cache_path,
+                "warning": snap.warning,
+            }
+            if is_cache_file(snap.path):
+                action = "use_cache"
+                cache_name = os.path.basename(snap.path)
+                mode = "?"
+                y_lo = "?"
+                y_hi = "?"
+                try:
+                    h = read_cache_header(snap.path)
+                    mode = str(h.get("cache_mode", "?"))
+                    y_lo = str(h.get("y_min", "?"))
+                    y_hi = str(h.get("y_max", "?"))
+                except Exception:
+                    pass
+                log(f"  {i:02d}. {snap.display_name} -> USE CACHE ({cache_name}) mode={mode} y=[{y_lo},{y_hi}]")
+                item.update({
+                    "planned_action": action,
+                    "cache_header_mode": mode,
+                    "cache_header_y_min": y_lo,
+                    "cache_header_y_max": y_hi,
+                })
+            else:
+                action = "use_raw"
+                raw_src = snap.raw_path or snap.path
+                surf_path = sidecar_cache_path(raw_src, opt.dimension, CACHE_MODE_SURFACE)
+                allb_path = sidecar_cache_path(raw_src, opt.dimension, CACHE_MODE_ALL_BLOCKS)
+                surf_ok, surf_reason = _cache_mismatch_reason(
+                    surf_path, raw_src, CACHE_MODE_SURFACE, opt.dimension, opt.y_min, opt.y_max
+                )
+                allb_ok, allb_reason = _cache_mismatch_reason(
+                    allb_path, raw_src, CACHE_MODE_ALL_BLOCKS, opt.dimension, opt.y_min, opt.y_max
+                )
+                log(
+                    f"  {i:02d}. {snap.display_name} -> USE RAW ({os.path.basename(raw_src)}) "
+                    f"cache_match(surface={str(bool(surf_ok)).lower()}:{surf_reason}, "
+                    f"all_blocks={str(bool(allb_ok)).lower()}:{allb_reason})"
+                )
+                log(f"      expected_surface={surf_path}")
+                log(f"      expected_all_blocks={allb_path}")
+                item.update({
+                    "planned_action": action,
+                    "raw_source": raw_src,
+                    "expected_surface_cache": surf_path,
+                    "expected_all_blocks_cache": allb_path,
+                    "surface_match": bool(surf_ok),
+                    "surface_reason": surf_reason,
+                    "all_blocks_match": bool(allb_ok),
+                    "all_blocks_reason": allb_reason,
+                })
+
+            plan_items.append(item)
+
+        cache_count = sum(1 for p in plan_items if p.get("planned_action") == "use_cache")
+        raw_count = sum(1 for p in plan_items if p.get("planned_action") == "use_raw")
+
+        log("[PREFLIGHT SUMMARY]")
+        log(f"  Planned cache-backed items: {cache_count}")
+        log(f"  Planned raw items: {raw_count}")
+        log(f"  Total planned items: {len(plan_items)}")
+        progress(80.0)
+
+        report_obj: Dict[str, Any] = {
+            "generated_utc": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+            "app": {
+                "name": APP_NAME,
+                "version": APP_VERSION,
+                "build": APP_BUILD,
+            },
+            "settings": {
+                "input_folder": folder,
+                "output_folder": out_dir,
+                "dimension": opt.dimension,
+                "y_min": opt.y_min,
+                "y_max": opt.y_max,
+                "target": opt.target_preset,
+                "output_cache_mode": output_cache_mode,
+                "crop_enabled": bool(opt.limit_enabled),
+                "crop": {
+                    "x_min": opt.x_min,
+                    "x_max": opt.x_max,
+                    "z_min": opt.z_min,
+                    "z_max": opt.z_max,
+                } if opt.limit_enabled else None,
+            },
+            "discovery": diag,
+            "discovery_log_lines": diag_lines,
+            "plan": plan_items,
+            "summary": {
+                "planned_cache_items": cache_count,
+                "planned_raw_items": raw_count,
+                "planned_total_items": len(plan_items),
+            },
+        }
+
+        with open(report_json, "w", encoding="utf-8") as f:
+            json.dump(report_obj, f, indent=2, ensure_ascii=False)
+
+        progress(100.0)
+        status("Preflight report complete.", "Review report files in output folder.")
+        log(f"Saved preflight text report: {report_txt}")
+        log(f"Saved preflight JSON report: {report_json}")
+
+        logf.close()
+        msgq.put(("done_preflight", {
+            "report_dir": report_dir,
+            "report_txt": report_txt,
+            "report_json": report_json,
+            "planned_total": len(plan_items),
+            "planned_cache": cache_count,
+            "planned_raw": raw_count,
+        }))
+    except CancelledError:
+        msgq.put(("done_preflight", {
+            "cancelled": True,
+        }))
+    except Exception:
+        msgq.put(("error", traceback.format_exc()))
 
 
 class App(tk.Tk):
@@ -5663,10 +7037,30 @@ class App(tk.Tk):
             pass
         self.style.configure("WMTT.Vertical.TScrollbar", width=16)
         self.style.configure("WMTT.Horizontal.TScrollbar", width=16)
-# --- shared state ---
+        # Keep cache-mode combobox visuals explicit across themes:
+        # white when editable (readonly), grey when locked (disabled).
+        self.style.configure("CacheMode.TCombobox", fieldbackground="#ffffff", foreground="#000000")
+        self.style.map(
+            "CacheMode.TCombobox",
+            fieldbackground=[("disabled", "#e0e0e0"), ("readonly", "#ffffff")],
+            foreground=[("disabled", "#666666"), ("readonly", "#000000")],
+        )
+        # Timelapse dropdowns that are always active should remain white.
+        self.style.configure("ActiveReadonly.TCombobox", fieldbackground="#ffffff", foreground="#000000")
+        self.style.map(
+            "ActiveReadonly.TCombobox",
+            fieldbackground=[("readonly", "#ffffff")],
+            foreground=[("readonly", "#000000")],
+        )
+        # --- shared state ---
         self.msgq: "queue.Queue[tuple]" = queue.Queue()
         self.cancel_event = threading.Event()
         self.worker_thread: Optional[threading.Thread] = None
+        self.current_task: Optional[str] = None
+        self.stop_control: Dict[str, str] = {"mode": "partial_gif"}
+        self._close_pending = False
+        self._close_deadline = 0.0
+        self._paused_worker_pids: List[int] = []
 
         # --- Timelapse tab vars ---
         self.folder_var = tk.StringVar()
@@ -5702,6 +7096,7 @@ class App(tk.Tk):
         self.cache_mode_combo = None
         self.cache_crop_note_var = tk.StringVar(value="")
         self._cache_mode_before_crop = CACHE_MODE_SURFACE
+        self._cache_mode_before_target = CACHE_MODE_SURFACE
         self.cache_dim_overworld_var = tk.BooleanVar(value=True)
         self.cache_dim_nether_var = tk.BooleanVar(value=False)
         self.cache_dim_end_var = tk.BooleanVar(value=False)
@@ -5742,6 +7137,7 @@ class App(tk.Tk):
 
         self._build_ui()
         self._resize_to_fit()
+        self.protocol("WM_DELETE_WINDOW", self.on_close)
 
         self._wire_timing_vars()
 
@@ -5974,12 +7370,12 @@ class App(tk.Tk):
         ttk.Label(opts, text="Dimension:").grid(row=0, column=0, sticky="w", **pad)
         ttk.Combobox(opts, textvariable=self.dimension_var,
                      values=["minecraft:overworld", "minecraft:the_nether", "minecraft:the_end"],
-                     state="readonly", width=22).grid(row=0, column=1, sticky="w", **pad)
+                     state="readonly", style="ActiveReadonly.TCombobox", width=22).grid(row=0, column=1, sticky="w", **pad)
 
         ttk.Label(opts, text="Video resolution:").grid(row=0, column=2, sticky="w", **pad)
         ttk.Combobox(opts, textvariable=self.target_var,
                      values=["720p (1280x720)", "1080p (1920x1080)", "4K (3840x2160)", "Original (no scaling)", "Custom…"],
-                     state="readonly", width=22).grid(row=0, column=3, sticky="w", **pad)
+                     state="readonly", style="ActiveReadonly.TCombobox", width=22).grid(row=0, column=3, sticky="w", **pad)
 
         ttk.Label(opts, text="Custom W×H:").grid(row=1, column=2, sticky="w", **pad)
         self.custom_wh_frame = ttk.Frame(opts)
@@ -6000,7 +7396,7 @@ class App(tk.Tk):
 
         ttk.Checkbutton(opts, text="Skip water (treat as transparent)", variable=self.skip_water_var).grid(row=2, column=2, columnspan=2, sticky="w", **pad)
         ttk.Label(opts, text="Hill shading:").grid(row=3, column=2, sticky="w", **pad)
-        ttk.Combobox(opts, textvariable=self.hillshade_var, values=["none", "normal", "strong"], state="readonly", width=12).grid(row=3, column=3, sticky="w", **pad)
+        ttk.Combobox(opts, textvariable=self.hillshade_var, values=["none", "normal", "strong"], state="readonly", style="ActiveReadonly.TCombobox", width=12).grid(row=3, column=3, sticky="w", **pad)
         ttk.Checkbutton(opts, text="Use palette loaded in palette editor",
                         variable=self.use_editor_palette_var).grid(
             row=4, column=2, columnspan=2, sticky="w", **pad)
@@ -6027,29 +7423,35 @@ class App(tk.Tk):
 
         ttk.Checkbutton(outopts, text="Keep frame PNGs after GIF is created", variable=self.keep_frames_var).grid(row=1, column=0, columnspan=3, sticky="w", **pad)
         ttk.Label(outopts, text="Output cache mode:").grid(row=2, column=0, sticky="w", **pad)
+        _cache_row = ttk.Frame(outopts)
+        _cache_row.grid(row=2, column=1, sticky="w", **pad)
         self.cache_mode_combo = ttk.Combobox(
-            outopts,
+            _cache_row,
             textvariable=self.cache_mode_var,
             values=[CACHE_MODE_SURFACE, CACHE_MODE_ALL_BLOCKS, CACHE_MODE_NONE],
             state="readonly",
+            style="CacheMode.TCombobox",
             width=18,
         )
-        self.cache_mode_combo.grid(row=2, column=1, sticky="w", **pad)
-        ttk.Label(
-            outopts,
-            text=(
-                "Controls whether .wmtt4mc cache files are built alongside output frames.\n"
-                "surface: default — smallest cache, fastest build\n"
-                "all_blocks: larger cache, can re-render with different Y range without rebuilding\n"
-                "none: don't build new caches (existing .wmtt4mc files are still used if present)"
-            ),
-            justify="left",
-            wraplength=760,
-        ).grid(row=3, column=0, columnspan=3, sticky="w", **pad)
+        self.cache_mode_combo.pack(side="left")
+        _help_bg = self.style.lookup("TLabelframe", "background") or self.cget("background")
+        _help_lbl = tk.Label(
+            _cache_row,
+            text="?",
+            font=("Segoe UI", 8),
+            bd=1,
+            relief="solid",
+            padx=3,
+            pady=0,
+            cursor="hand2",
+            bg=_help_bg,
+        )
+        _help_lbl.pack(side="left", padx=(5, 0))
+        _help_lbl.bind("<Button-1>", lambda _e: self.on_cache_mode_help())
 
-        ttk.Label(outopts, text="Cache dimensions:").grid(row=4, column=0, sticky="w", **pad)
+        ttk.Label(outopts, text="Cache dimensions:").grid(row=3, column=0, sticky="w", **pad)
         dim_check_frame = ttk.Frame(outopts)
-        dim_check_frame.grid(row=4, column=1, columnspan=2, sticky="w", **pad)
+        dim_check_frame.grid(row=3, column=1, columnspan=2, sticky="w", **pad)
         self.cache_dim_checks = []
         for _var, _lbl in [
             (self.cache_dim_overworld_var, "Overworld"),
@@ -6061,7 +7463,7 @@ class App(tk.Tk):
             self.cache_dim_checks.append(_cb)
         self.cache_mode_var.trace_add("write", self._update_cache_dim_state)
 
-        ttk.Label(outopts, textvariable=self.cache_crop_note_var, foreground="#a04a00").grid(row=5, column=0, columnspan=3, sticky="w", **pad)
+        ttk.Label(outopts, textvariable=self.cache_crop_note_var, foreground="#a04a00").grid(row=4, column=0, columnspan=3, sticky="w", **pad)
 
         # Log + progress
         # Bottom controls (progress, buttons, advanced)
@@ -6080,7 +7482,7 @@ class App(tk.Tk):
         self.go_btn.pack(side="left")
         self.cache_btn = ttk.Button(buttons, text="Build / update caches", command=self.on_build_caches)
         self.cache_btn.pack(side="left", padx=(8, 0))
-        ttk.Button(buttons, text="Cancel", command=self.on_cancel).pack(side="left", padx=8)
+        ttk.Button(buttons, text="Stop", command=self.on_cancel).pack(side="left", padx=8)
 
         # Advanced toggle moved to bottom
         adv_toggle = ttk.Button(buttons, text="Advanced ▾", command=self.toggle_advanced)
@@ -6104,11 +7506,13 @@ class App(tk.Tk):
         ttk.Checkbutton(self.adv_frame, text="Debug block IDs + unknowns", variable=self.debug_blocks_var).grid(row=2, column=0, columnspan=2, sticky="w", **pad)
         self.debug_btn = ttk.Button(self.adv_frame, text="Debug: render 1 chunk…", command=self.on_debug_one_chunk)
         self.debug_btn.grid(row=2, column=2, sticky="w", **pad)
+        self.preflight_btn = ttk.Button(self.adv_frame, text="Run preflight report…", command=self.on_run_preflight)
+        self.preflight_btn.grid(row=3, column=2, sticky="w", **pad)
         # Log output (hidden in Advanced by default)
         self.adv_frame.columnconfigure(0, weight=1)
-        self.adv_frame.rowconfigure(3, weight=1)
+        self.adv_frame.rowconfigure(4, weight=1)
         logbox = ttk.LabelFrame(self.adv_frame, text="Log")
-        logbox.grid(row=3, column=0, columnspan=3, sticky="nsew", padx=0, pady=(8, 0))
+        logbox.grid(row=4, column=0, columnspan=3, sticky="nsew", padx=0, pady=(8, 0))
         sb = ttk.Scrollbar(logbox, orient="vertical")
         sb.pack(side="right", fill="y")
         self.log_text = tk.Text(logbox, height=10, wrap="word", yscrollcommand=sb.set)
@@ -6117,6 +7521,7 @@ class App(tk.Tk):
 
         # Hide custom W/H unless Custom selected
         self.target_var.trace_add("write", lambda *_: self._sync_custom())
+        self.target_var.trace_add("write", lambda *_: self._sync_cache_controls_for_crop())
         self._sync_custom()
         self._sync_debug_button_visibility()
         self.debug_blocks_var.trace_add("write", lambda *_: self._sync_debug_button_visibility())
@@ -7091,7 +8496,7 @@ class App(tk.Tk):
         li("Run \u201cBuild / update caches\u201d before a large render batch \u2014 future renders\n"
            "      will be much faster and you can then delete the original ZIPs.")
         li("Both Java Edition and Bedrock Edition world formats are supported.")
-        li("You can cancel any render at any time with the Cancel button.")
+        li("You can stop any render at any time with the Stop button.")
         li("Detailed log output (including errors) appears in  Advanced \u203a Log.")
         i("end", "\n")
 
@@ -7182,7 +8587,7 @@ class App(tk.Tk):
         li("Run \u201cBuild / update caches\u201d before a large render batch \u2014 future renders\n"
            "      will be much faster and you can then delete the original ZIPs.")
         li("Both Java Edition and Bedrock Edition world formats are supported.")
-        li("You can cancel any render at any time with the Cancel button.")
+        li("You can stop any render at any time with the Stop button.")
         li("Use \u201cFrom texture pack\u2026\u201d to generate an accurate per-block colour palette\n"
            "      from the actual textures your server or client is using.")
         li("After a render, open  unknown_blocks.json  in the run folder and use\n"
@@ -7217,8 +8622,12 @@ class App(tk.Tk):
             except Exception:
                 pass
 
+    def _is_original_timelapse_target(self) -> bool:
+        return self.target_var.get().strip().lower().startswith("original")
+
     def _sync_cache_controls_for_crop(self):
         crop_enabled = bool(self.limit_enabled_var.get())
+        non_original_target = not self._is_original_timelapse_target()
 
         if crop_enabled:
             mode = self.cache_mode_var.get().strip() or CACHE_MODE_SURFACE
@@ -7238,8 +8647,26 @@ class App(tk.Tk):
                 pass
             return
 
-        if self.cache_mode_var.get().strip() == CACHE_MODE_NONE and self._cache_mode_before_crop in (CACHE_MODE_SURFACE, CACHE_MODE_ALL_BLOCKS):
-            self.cache_mode_var.set(self._cache_mode_before_crop)
+        if non_original_target:
+            mode = self.cache_mode_var.get().strip() or CACHE_MODE_SURFACE
+            if mode != CACHE_MODE_NONE:
+                self._cache_mode_before_target = mode
+                self.cache_mode_var.set(CACHE_MODE_NONE)
+            self.cache_crop_note_var.set("Output cache mode is disabled unless Video resolution is set to Original (no scaling).")
+            if bool(self.busy_var.get()):
+                return
+            try:
+                if self.cache_mode_combo is not None:
+                    self.cache_mode_combo.configure(state="disabled")
+            except Exception:
+                pass
+            return
+
+        if self.cache_mode_var.get().strip() == CACHE_MODE_NONE:
+            if self._cache_mode_before_target in (CACHE_MODE_SURFACE, CACHE_MODE_ALL_BLOCKS):
+                self.cache_mode_var.set(self._cache_mode_before_target)
+            elif self._cache_mode_before_crop in (CACHE_MODE_SURFACE, CACHE_MODE_ALL_BLOCKS):
+                self.cache_mode_var.set(self._cache_mode_before_crop)
         self.cache_crop_note_var.set("")
         if bool(self.busy_var.get()):
             return
@@ -7260,6 +8687,16 @@ class App(tk.Tk):
             self.single_custom_wh.grid()
         else:
             self.single_custom_wh.grid_remove()
+
+    def on_cache_mode_help(self):
+        messagebox.showinfo(
+            "Output cache mode",
+            "Controls whether .wmtt4mc cache files are built alongside output frames.\n\n"
+            "- surface: default; smallest cache and fastest build.\n"
+            "- all_blocks: larger cache; supports re-rendering with different Y ranges without rebuilding.\n"
+            "- none: do not build new caches (existing .wmtt4mc files are still used if present).",
+            parent=self,
+        )
 
     def toggle_advanced(self):
         self.advanced_open.set(not self.advanced_open.get())
@@ -7358,6 +8795,10 @@ class App(tk.Tk):
             self.cache_btn.configure(state=state)
         except Exception:
             pass
+        try:
+            self.preflight_btn.configure(state=state)
+        except Exception:
+            pass
         if not busy:
             self._sync_cache_controls_for_crop()
         else:
@@ -7370,11 +8811,162 @@ class App(tk.Tk):
 
     # ---------- Actions ----------
     def on_cancel(self):
+        if not (self.worker_thread and self.worker_thread.is_alive()):
+            self.cancel_event.set()
+            _force_stop_registered_pools()
+            return
+
+        if self.current_task == "timelapse":
+            self._paused_worker_pids = self._pause_child_processes()
+            choice = messagebox.askyesnocancel(
+                "Stop Rendering",
+                "Stop rendering?\n\n"
+                "Yes: Stop now and build a GIF from completed frames.\n"
+                "No: Stop immediately and do not build a GIF.\n"
+                "Cancel: Continue rendering.",
+                parent=self,
+            )
+            if choice is None:
+                self._resume_child_processes(self._paused_worker_pids)
+                self._paused_worker_pids = []
+                self._set_status("Continuing render.", "Stop request cancelled.")
+                return
+
+            self._resume_child_processes(self._paused_worker_pids)
+            self._paused_worker_pids = []
+            if choice:
+                self.stop_control["mode"] = "partial_gif"
+                self.cancel_event.set()
+                _force_stop_registered_pools(log_cb=lambda m: self._log(m, "timelapse"))
+                self._set_status("Stop requested…", "Finishing current work and building a partial GIF.")
+                return
+
+            self.stop_control["mode"] = "immediate"
+            self.cancel_event.set()
+            _force_stop_registered_pools(log_cb=lambda m: self._log(m, "timelapse"))
+            self._force_kill_child_processes()
+            self._set_status("Stop requested…", "Stopping immediately. GIF build will be skipped.")
+            return
+
+        self.cancel_event.set()
+        _force_stop_registered_pools()
+        self._set_status("Stop requested…", "Stopping current task as quickly as possible.")
+
+    def _pause_child_processes(self) -> List[int]:
+        paused: List[int] = []
+        try:
+            import psutil  # type: ignore
+            me = psutil.Process(os.getpid())
+            for p in me.children(recursive=True):
+                try:
+                    if p.is_running():
+                        p.suspend()
+                        paused.append(int(p.pid))
+                except Exception:
+                    pass
+            if paused:
+                self._log(f"[STOP] Paused {len(paused)} worker process(es) while waiting for stop choice.", "timelapse")
+        except Exception:
+            paused = []
+        return paused
+
+    def _resume_child_processes(self, pids: List[int]) -> None:
+        if not pids:
+            return
+        try:
+            import psutil  # type: ignore
+            resumed = 0
+            for pid in pids:
+                try:
+                    proc = psutil.Process(int(pid))
+                    proc.resume()
+                    resumed += 1
+                except Exception:
+                    pass
+            if resumed:
+                self._log(f"[STOP] Resumed {resumed} paused worker process(es).", "timelapse")
+        except Exception:
+            pass
+
+    def _force_kill_child_processes(self):
+        """Best-effort kill of child worker processes for fast shutdown."""
+        try:
+            import psutil  # type: ignore
+            me = psutil.Process(os.getpid())
+            children = me.children(recursive=True)
+            for p in children:
+                try:
+                    p.terminate()
+                except Exception:
+                    pass
+            try:
+                _gone, alive = psutil.wait_procs(children, timeout=2.0)
+            except Exception:
+                alive = []
+            for p in alive:
+                try:
+                    p.kill()
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+    def _close_when_worker_stops(self):
         if self.worker_thread and self.worker_thread.is_alive():
-            self.cancel_event.set()
-            self._set_status("Cancel requested… stopping soon.", "If a chunk is being processed, it will stop as soon as possible.")
+            if time.time() >= self._close_deadline:
+                _force_stop_registered_pools()
+                self._force_kill_child_processes()
+                try:
+                    self.destroy()
+                except Exception:
+                    pass
+                return
+            self.after(150, self._close_when_worker_stops)
+            return
+        try:
+            self.destroy()
+        except Exception:
+            pass
+
+    def on_close(self):
+        if not (self.worker_thread and self.worker_thread.is_alive()):
+            self.destroy()
+            return
+
+        if self.current_task == "timelapse":
+            self._paused_worker_pids = self._pause_child_processes()
+            choice = messagebox.askyesnocancel(
+                "Close While Rendering",
+                "A render is still running.\n\n"
+                "Yes: Stop and build a partial GIF, then close.\n"
+                "No: Stop immediately (no GIF), then close.\n"
+                "Cancel: Keep rendering.",
+                parent=self,
+            )
+            if choice is None:
+                self._resume_child_processes(self._paused_worker_pids)
+                self._paused_worker_pids = []
+                return
+            self._resume_child_processes(self._paused_worker_pids)
+            self._paused_worker_pids = []
+            self.stop_control["mode"] = "partial_gif" if choice else "immediate"
         else:
-            self.cancel_event.set()
+            if not messagebox.askyesno(
+                "Close While Busy",
+                "A background task is still running. Stop it and close the app?",
+                parent=self,
+            ):
+                return
+            self.stop_control["mode"] = "immediate"
+
+        self.cancel_event.set()
+        _force_stop_registered_pools(log_cb=lambda m: self._log(m, "timelapse"))
+        if self.stop_control.get("mode") == "immediate":
+            self._force_kill_child_processes()
+        self._close_pending = True
+        self._close_deadline = time.time() + 8.0
+        self._set_status("Stopping…", "Closing app after workers stop.")
+        self._close_when_worker_stops()
 
     def _gather_options(self) -> RenderOptions:
         opt = RenderOptions()
@@ -7449,6 +9041,8 @@ class App(tk.Tk):
 
         # Clear cancel + log
         self.cancel_event.clear()
+        self.current_task = "timelapse"
+        self.stop_control["mode"] = "partial_gif"
         self._set_busy(True)
         self._set_progress(0.0)
         self._set_status("Starting…", "")
@@ -7456,8 +9050,15 @@ class App(tk.Tk):
         
         # Show cache discovery diagnostics
         self._log(f"Snapshots: {len(snapshots)} (processing newest → oldest)", "timelapse")
-        # Use enhanced diagnostics to show what was found
-        _, _diag = discover_with_diagnostics(folder, log_cb=lambda m: self._log(m, "timelapse"), dimension=self.dimension_var.get())
+        # Use enhanced diagnostics to show what was found and persist the same lines into run.log.
+        discovery_lines: List[str] = []
+
+        def _diag_log(msg: str) -> None:
+            text = str(msg)
+            discovery_lines.append(text)
+            self._log(text, "timelapse")
+
+        _, _diag = discover_with_diagnostics(folder, log_cb=_diag_log, dimension=self.dimension_var.get())
         self._log(f"Output cache mode: {self.cache_mode_var.get()}", "timelapse")
         
         self._log("Note: .wmtt4mc sidecar caches are only created by 'Build / update caches'.", "timelapse")
@@ -7476,7 +9077,18 @@ class App(tk.Tk):
             return
 
         def runner():
-            worker_run(snapshots, out_dir, opt, seconds_per_frame, self.msgq, self.cancel_event)
+            worker_run(
+                snapshots,
+                out_dir,
+                opt,
+                seconds_per_frame,
+                self.msgq,
+                self.cancel_event,
+                stop_control=self.stop_control,
+                input_folder=folder,
+                output_cache_mode=self.cache_mode_var.get(),
+                discovery_lines=discovery_lines,
+            )
 
         self.worker_thread = threading.Thread(target=runner, daemon=True)
         self.worker_thread.start()
@@ -7608,6 +9220,8 @@ class App(tk.Tk):
 
         self._persist_ui_settings()
         self.cancel_event.clear()
+        self.current_task = "cache"
+        self.stop_control["mode"] = "immediate"
         self._set_busy(True)
         self._set_progress(0.0)
         self._set_status("Starting cache build…", "")
@@ -7673,6 +9287,8 @@ class App(tk.Tk):
 
         # Use a worker thread and reuse message queue with "single_*" tags
         self.cancel_event.clear()
+        self.current_task = "single"
+        self.stop_control["mode"] = "immediate"
         self._log("-" * 60, "single")
         self._log(f"Rendering single map from: {zip_path}", "single")
         self._set_status("Rendering single map…", "")
@@ -7722,6 +9338,8 @@ class App(tk.Tk):
 
         opt = self._gather_options()
         self.cancel_event.clear()
+        self.current_task = "debug"
+        self.stop_control["mode"] = "immediate"
         self._set_busy(True)
         self._set_progress(0.0)
         self._set_status("Debugging…", "Rendering one chunk PNG + debug IDs.")
@@ -7731,6 +9349,45 @@ class App(tk.Tk):
             debug_one_chunk_worker(zip_path, out_dir, opt, self.msgq, self.cancel_event)
 
         self.worker_thread = threading.Thread(target=dbg_runner, daemon=True)
+        self.worker_thread.start()
+
+    def on_run_preflight(self):
+        folder = self.folder_var.get().strip()
+        if not folder or not os.path.isdir(folder):
+            messagebox.showerror("Missing input", "Select a backups folder first.")
+            return
+
+        out_dir = self.out_var.get().strip()
+        if not out_dir:
+            messagebox.showerror("Missing output", "Select an output folder first.")
+            return
+        try:
+            os.makedirs(out_dir, exist_ok=True)
+        except Exception:
+            messagebox.showerror("Invalid output", "Could not create/access output folder.")
+            return
+
+        opt = self._gather_options()
+        self.cancel_event.clear()
+        self.current_task = "preflight"
+        self.stop_control["mode"] = "immediate"
+        self._set_busy(True)
+        self._set_progress(0.0)
+        self._set_status("Running preflight report…", "Collecting input and cache diagnostics.")
+        self._log("-" * 60, "timelapse")
+        self._log("Preflight: no rendering will be performed.", "timelapse")
+
+        def preflight_runner():
+            preflight_report_worker(
+                folder,
+                out_dir,
+                opt,
+                self.cache_mode_var.get(),
+                self.msgq,
+                self.cancel_event,
+            )
+
+        self.worker_thread = threading.Thread(target=preflight_runner, daemon=True)
         self.worker_thread.start()
 
     def _poll_messages(self):
@@ -7746,7 +9403,15 @@ class App(tk.Tk):
                     self._set_progress(payload)
                 elif kind == "done":
                     self._set_busy(False)
-                    self._set_status("Done.", "Timelapse finished.")
+                    self.current_task = None
+                    if payload.get("cancelled"):
+                        mode = str(payload.get("stopped_mode", "")).strip().lower()
+                        if mode == "immediate":
+                            self._set_status("Stopped.", "Render stopped immediately. GIF was not built.")
+                        else:
+                            self._set_status("Stopped.", "Render stopped. Partial GIF mode selected.")
+                    else:
+                        self._set_status("Done.", "Timelapse finished.")
                     # Optionally delete frames if user chose
                     try:
                         run_dir = payload.get("run_dir", "")
@@ -7758,14 +9423,17 @@ class App(tk.Tk):
                         pass
                 elif kind == "error":
                     self._set_busy(False)
+                    self.current_task = None
                     self._set_status("Error.", "See log for details.")
                     self._log(payload, "timelapse")
                 elif kind == "done_debug":
                     self._set_busy(False)
+                    self.current_task = None
                     self._set_status("Debug done.", "")
                     self._log(payload, "timelapse")
                 elif kind == "cache_done":
                     self._set_busy(False)
+                    self.current_task = None
                     if payload.get("cancelled"):
                         self._set_status("Cache build cancelled.", "")
                     else:
@@ -7777,12 +9445,32 @@ class App(tk.Tk):
                             f"Cache build complete: built={payload.get('built', 0)} skipped={payload.get('skipped', 0)} failed={payload.get('failed', 0)} total={payload.get('total', 0)} mode={payload.get('mode', '')}",
                             "timelapse",
                         )
+                elif kind == "done_preflight":
+                    self._set_busy(False)
+                    self.current_task = None
+                    if payload.get("cancelled"):
+                        self._set_status("Preflight cancelled.", "")
+                    else:
+                        self._set_status(
+                            "Preflight complete.",
+                            f"Planned {payload.get('planned_total', 0)} item(s): {payload.get('planned_cache', 0)} cache, {payload.get('planned_raw', 0)} raw"
+                        )
+                        self._log(
+                            f"Preflight report complete: {payload.get('report_txt', '')}",
+                            "timelapse",
+                        )
+                        self._log(
+                            f"Preflight JSON: {payload.get('report_json', '')}",
+                            "timelapse",
+                        )
                 elif kind == "single_done":
                     self._set_busy(False)
+                    self.current_task = None
                     self._set_status("Single map saved.", payload)
                     self._log(f"Saved: {payload}", "single")
                 elif kind == "single_error":
                     self._set_busy(False)
+                    self.current_task = None
                     self._set_status("Error.", "Single map render failed.")
                     self._log(payload, "single")
                 else:

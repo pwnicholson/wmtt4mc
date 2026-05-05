@@ -1,0 +1,526 @@
+{
+  "schema_version": 1,
+  "__meta__": {
+    "source_commit": "af4cf4e",
+    "recovered_utc": "2026-04-16T02:09:44Z",
+    "notes": "Recovered legacy block-ID PALETTE from wmtt4mc.py before v1.6.0 palette replacement"
+  },
+  "rgb_overrides": {
+    "minecraft:acacia_leaves": [
+      84,
+      148,
+      52
+    ],
+    "minecraft:acacia_log": [
+      140,
+      90,
+      60
+    ],
+    "minecraft:acacia_planks": [
+      170,
+      90,
+      52
+    ],
+    "minecraft:activator_rail": [
+      150,
+      130,
+      90
+    ],
+    "minecraft:ancient_debris": [
+      110,
+      80,
+      70
+    ],
+    "minecraft:andesite": [
+      136,
+      136,
+      136
+    ],
+    "minecraft:azalea_leaves": [
+      78,
+      154,
+      56
+    ],
+    "minecraft:bamboo_block": [
+      166,
+      160,
+      96
+    ],
+    "minecraft:bamboo_planks": [
+      204,
+      192,
+      112
+    ],
+    "minecraft:barrel": [
+      130,
+      95,
+      60
+    ],
+    "minecraft:birch_leaves": [
+      96,
+      168,
+      64
+    ],
+    "minecraft:birch_log": [
+      200,
+      190,
+      150
+    ],
+    "minecraft:birch_planks": [
+      196,
+      176,
+      118
+    ],
+    "minecraft:blackstone": [
+      35,
+      35,
+      38
+    ],
+    "minecraft:blackstone_wall": [
+      38,
+      38,
+      40
+    ],
+    "minecraft:blue_ice": [
+      120,
+      170,
+      255
+    ],
+    "minecraft:calcite": [
+      220,
+      220,
+      225
+    ],
+    "minecraft:cherry_leaves": [
+      229,
+      173,
+      194
+    ],
+    "minecraft:cherry_log": [
+      170,
+      130,
+      120
+    ],
+    "minecraft:cherry_planks": [
+      227,
+      179,
+      173
+    ],
+    "minecraft:chest": [
+      150,
+      110,
+      65
+    ],
+    "minecraft:clay": [
+      160,
+      170,
+      180
+    ],
+    "minecraft:coal_block": [
+      18,
+      18,
+      18
+    ],
+    "minecraft:coal_ore": [
+      50,
+      50,
+      50
+    ],
+    "minecraft:coarse_dirt": [
+      120,
+      85,
+      60
+    ],
+    "minecraft:cobblestone": [
+      120,
+      120,
+      120
+    ],
+    "minecraft:copper_ore": [
+      170,
+      105,
+      80
+    ],
+    "minecraft:crafting_table": [
+      140,
+      105,
+      70
+    ],
+    "minecraft:crimson_planks": [
+      122,
+      55,
+      88
+    ],
+    "minecraft:dark_oak_leaves": [
+      48,
+      96,
+      48
+    ],
+    "minecraft:dark_oak_log": [
+      60,
+      45,
+      30
+    ],
+    "minecraft:dark_oak_planks": [
+      70,
+      53,
+      33
+    ],
+    "minecraft:deepslate": [
+      80,
+      80,
+      90
+    ],
+    "minecraft:detector_rail": [
+      150,
+      130,
+      90
+    ],
+    "minecraft:diamond_ore": [
+      90,
+      190,
+      190
+    ],
+    "minecraft:diorite": [
+      188,
+      188,
+      188
+    ],
+    "minecraft:dirt": [
+      134,
+      96,
+      67
+    ],
+    "minecraft:dirt_path": [
+      148,
+      122,
+      65
+    ],
+    "minecraft:dripstone_block": [
+      160,
+      140,
+      120
+    ],
+    "minecraft:emerald_ore": [
+      55,
+      170,
+      85
+    ],
+    "minecraft:end_stone": [
+      220,
+      220,
+      180
+    ],
+    "minecraft:fern": [
+      96,
+      160,
+      64
+    ],
+    "minecraft:flowering_azalea_leaves": [
+      86,
+      160,
+      60
+    ],
+    "minecraft:furnace": [
+      110,
+      110,
+      110
+    ],
+    "minecraft:gold_ore": [
+      205,
+      180,
+      70
+    ],
+    "minecraft:granite": [
+      149,
+      103,
+      85
+    ],
+    "minecraft:grass": [
+      106,
+      170,
+      64
+    ],
+    "minecraft:grass_block": [
+      106,
+      170,
+      64
+    ],
+    "minecraft:gravel": [
+      136,
+      126,
+      126
+    ],
+    "minecraft:ice": [
+      170,
+      210,
+      255
+    ],
+    "minecraft:iron_ore": [
+      155,
+      135,
+      120
+    ],
+    "minecraft:jungle_leaves": [
+      64,
+      140,
+      48
+    ],
+    "minecraft:jungle_log": [
+      120,
+      90,
+      60
+    ],
+    "minecraft:jungle_planks": [
+      160,
+      115,
+      80
+    ],
+    "minecraft:lapis_ore": [
+      55,
+      85,
+      170
+    ],
+    "minecraft:large_fern": [
+      88,
+      150,
+      62
+    ],
+    "minecraft:lava": [
+      255,
+      80,
+      0
+    ],
+    "minecraft:mangrove_leaves": [
+      66,
+      132,
+      54
+    ],
+    "minecraft:mangrove_log": [
+      110,
+      70,
+      55
+    ],
+    "minecraft:mangrove_planks": [
+      110,
+      55,
+      50
+    ],
+    "minecraft:moss_block": [
+      90,
+      160,
+      75
+    ],
+    "minecraft:moss_carpet": [
+      90,
+      160,
+      75
+    ],
+    "minecraft:mud": [
+      90,
+      74,
+      62
+    ],
+    "minecraft:mud_bricks": [
+      137,
+      104,
+      79
+    ],
+    "minecraft:mycelium": [
+      120,
+      90,
+      120
+    ],
+    "minecraft:nether_gold_ore": [
+      195,
+      155,
+      85
+    ],
+    "minecraft:nether_quartz_ore": [
+      185,
+      170,
+      165
+    ],
+    "minecraft:netherrack": [
+      110,
+      54,
+      52
+    ],
+    "minecraft:oak_leaves": [
+      72,
+      144,
+      48
+    ],
+    "minecraft:oak_log": [
+      102,
+      81,
+      51
+    ],
+    "minecraft:oak_planks": [
+      162,
+      130,
+      78
+    ],
+    "minecraft:obsidian": [
+      20,
+      18,
+      30
+    ],
+    "minecraft:packed_ice": [
+      140,
+      190,
+      255
+    ],
+    "minecraft:packed_mud": [
+      142,
+      107,
+      80
+    ],
+    "minecraft:pale_oak_planks": [
+      228,
+      218,
+      216
+    ],
+    "minecraft:podzol": [
+      122,
+      102,
+      62
+    ],
+    "minecraft:polished_blackstone": [
+      43,
+      43,
+      46
+    ],
+    "minecraft:powered_rail": [
+      150,
+      130,
+      90
+    ],
+    "minecraft:rail": [
+      130,
+      130,
+      130
+    ],
+    "minecraft:red_sand": [
+      201,
+      114,
+      48
+    ],
+    "minecraft:redstone_ore": [
+      170,
+      55,
+      55
+    ],
+    "minecraft:redstone_torch": [
+      200,
+      60,
+      60
+    ],
+    "minecraft:rooted_dirt": [
+      120,
+      85,
+      60
+    ],
+    "minecraft:sand": [
+      219,
+      211,
+      160
+    ],
+    "minecraft:scaffolding": [
+      190,
+      170,
+      120
+    ],
+    "minecraft:short_grass": [
+      106,
+      170,
+      64
+    ],
+    "minecraft:slab": [
+      140,
+      130,
+      120
+    ],
+    "minecraft:snow": [
+      240,
+      240,
+      240
+    ],
+    "minecraft:snow_block": [
+      240,
+      240,
+      240
+    ],
+    "minecraft:spruce_leaves": [
+      48,
+      120,
+      48
+    ],
+    "minecraft:spruce_log": [
+      80,
+      60,
+      40
+    ],
+    "minecraft:spruce_planks": [
+      114,
+      84,
+      48
+    ],
+    "minecraft:stairs": [
+      140,
+      130,
+      120
+    ],
+    "minecraft:stone": [
+      125,
+      125,
+      125
+    ],
+    "minecraft:tall_grass": [
+      106,
+      170,
+      64
+    ],
+    "minecraft:terracotta": [
+      152,
+      94,
+      68
+    ],
+    "minecraft:torch": [
+      245,
+      200,
+      80
+    ],
+    "minecraft:trapdoor": [
+      150,
+      120,
+      80
+    ],
+    "minecraft:tuff": [
+      110,
+      110,
+      120
+    ],
+    "minecraft:wall_torch": [
+      245,
+      200,
+      80
+    ],
+    "minecraft:warped_planks": [
+      50,
+      110,
+      110
+    ],
+    "minecraft:water": [
+      64,
+      64,
+      255
+    ],
+    "minecraft:wheat": [
+      167,
+      152,
+      73
+    ]
+  },
+  "transparent_blocks": []
+}

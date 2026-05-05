@@ -1,0 +1,124 @@
+{
+  "generated_utc": "2026-04-21T18:33:45Z",
+  "app": {
+    "name": "World Map Timeline Tool for Minecraft",
+    "version": "1.6.0",
+    "build": "2026.04.21.06"
+  },
+  "settings": {
+    "input_folder": "F:/Development/WMTTT4MC-Master/Season Eight SAMPLE",
+    "output_folder": "c:\\Users\\webst\\Documents\\GitHub\\wmtt4mc\\phase2_compare\\preflight_smoke",
+    "dimension": "minecraft:overworld",
+    "y_min": 0,
+    "y_max": 320,
+    "target": "1080p (1920x1080)",
+    "output_cache_mode": "all_blocks",
+    "crop_enabled": false,
+    "crop": null
+  },
+  "discovery": {
+    "raw_sources": [
+      "Season Eight 2025-10-11.zip",
+      "Season Eight 2025-12-11.zip",
+      "Season Eight 2026-03-04.zip",
+      "Season Eight 2026-03-27.zip"
+    ],
+    "cache_files": [
+      "Season Eight 2025-10-11_nether.wmtt4mc",
+      "Season Eight 2025-10-11_overworld.wmtt4mc",
+      "Season Eight 2025-12-11_end.wmtt4mc",
+      "Season Eight 2025-12-11_nether.wmtt4mc",
+      "Season Eight 2025-12-11_overworld.wmtt4mc"
+    ],
+    "ignored_tmp_files": [],
+    "matches": 2,
+    "stale_caches": 0,
+    "orphaned_caches": 0,
+    "corrupted_caches": 0,
+    "total": 4
+  },
+  "discovery_log_lines": [
+    "[DISCOVERY] Found 4 raw backup(s).",
+    "  - Season Eight 2025-10-11.zip (kind: zip)",
+    "  - Season Eight 2025-12-11.zip (kind: zip)",
+    "  - Season Eight 2026-03-04.zip (kind: zip)",
+    "  - Season Eight 2026-03-27.zip (kind: zip)",
+    "[DISCOVERY] Found 5 cache file(s).",
+    "  - Season Eight 2025-10-11_nether.wmtt4mc",
+    "  - Season Eight 2025-10-11_overworld.wmtt4mc",
+    "  - Season Eight 2025-12-11_end.wmtt4mc",
+    "  - Season Eight 2025-12-11_nether.wmtt4mc",
+    "  - Season Eight 2025-12-11_overworld.wmtt4mc",
+    "[DISCOVERY SUMMARY]",
+    "  Total items: 4",
+    "  Matched caches: 2",
+    "[CACHE I/O] Header cache: 2 accesses (0.0% hit rate)"
+  ],
+  "plan": [
+    {
+      "index": 1,
+      "display_name": "Season Eight 2025-10-11.zip",
+      "kind": "cache",
+      "path": "F:/Development/WMTTT4MC-Master/Season Eight SAMPLE\\Season Eight 2025-10-11_overworld.wmtt4mc",
+      "raw_path": "F:/Development/WMTTT4MC-Master/Season Eight SAMPLE\\Season Eight 2025-10-11.zip",
+      "cache_path": "F:/Development/WMTTT4MC-Master/Season Eight SAMPLE\\Season Eight 2025-10-11_overworld.wmtt4mc",
+      "warning": "",
+      "planned_action": "use_cache",
+      "cache_header_mode": "all_blocks",
+      "cache_header_y_min": "0",
+      "cache_header_y_max": "320"
+    },
+    {
+      "index": 2,
+      "display_name": "Season Eight 2025-12-11.zip",
+      "kind": "cache",
+      "path": "F:/Development/WMTTT4MC-Master/Season Eight SAMPLE\\Season Eight 2025-12-11_overworld.wmtt4mc",
+      "raw_path": "F:/Development/WMTTT4MC-Master/Season Eight SAMPLE\\Season Eight 2025-12-11.zip",
+      "cache_path": "F:/Development/WMTTT4MC-Master/Season Eight SAMPLE\\Season Eight 2025-12-11_overworld.wmtt4mc",
+      "warning": "",
+      "planned_action": "use_cache",
+      "cache_header_mode": "all_blocks",
+      "cache_header_y_min": "0",
+      "cache_header_y_max": "320"
+    },
+    {
+      "index": 3,
+      "display_name": "Season Eight 2026-03-04.zip",
+      "kind": "zip",
+      "path": "F:/Development/WMTTT4MC-Master/Season Eight SAMPLE\\Season Eight 2026-03-04.zip",
+      "raw_path": null,
+      "cache_path": null,
+      "warning": "",
+      "planned_action": "use_raw",
+      "raw_source": "F:/Development/WMTTT4MC-Master/Season Eight SAMPLE\\Season Eight 2026-03-04.zip",
+      "expected_surface_cache": "F:/Development/WMTTT4MC-Master/Season Eight SAMPLE\\Season Eight 2026-03-04_overworld_surface.wmtt4mc",
+      "expected_all_blocks_cache": "F:/Development/WMTTT4MC-Master/Season Eight SAMPLE\\Season Eight 2026-03-04_overworld_allblocks.wmtt4mc",
+      "surface_match": false,
+      "surface_reason": "missing",
+      "all_blocks_match": false,
+      "all_blocks_reason": "missing"
+    },
+    {
+      "index": 4,
+      "display_name": "Season Eight 2026-03-27.zip",
+      "kind": "zip",
+      "path": "F:/Development/WMTTT4MC-Master/Season Eight SAMPLE\\Season Eight 2026-03-27.zip",
+      "raw_path": null,
+      "cache_path": null,
+      "warning": "",
+      "planned_action": "use_raw",
+      "raw_source": "F:/Development/WMTTT4MC-Master/Season Eight SAMPLE\\Season Eight 2026-03-27.zip",
+      "expected_surface_cache": "F:/Development/WMTTT4MC-Master/Season Eight SAMPLE\\Season Eight 2026-03-27_overworld_surface.wmtt4mc",
+      "expected_all_blocks_cache": "F:/Development/WMTTT4MC-Master/Season Eight SAMPLE\\Season Eight 2026-03-27_overworld_allblocks.wmtt4mc",
+      "surface_match": false,
+      "surface_reason": "missing",
+      "all_blocks_match": false,
+      "all_blocks_reason": "missing"
+    }
+  ],
+  "summary": {
+    "planned_cache_items": 2,
+    "planned_raw_items": 2,
+    "planned_total_items": 4
+  }
+}

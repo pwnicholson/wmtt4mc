@@ -1,0 +1,68 @@
+{
+  "module_dir": "c:/Users/webst/Documents/GitHub/wmtt4mc/.ab_worktree_af4cf4e",
+  "dimension": "minecraft:overworld",
+  "folder": "F:/Development/WMTTT4MC-Master/Season Eight SAMPLE",
+  "raw_sources": [
+    {
+      "kind": "zip",
+      "display_name": "Season Eight 2025-10-11.zip",
+      "path": "F:/Development/WMTTT4MC-Master/Season Eight SAMPLE\\Season Eight 2025-10-11.zip"
+    },
+    {
+      "kind": "zip",
+      "display_name": "Season Eight 2025-12-11.zip",
+      "path": "F:/Development/WMTTT4MC-Master/Season Eight SAMPLE\\Season Eight 2025-12-11.zip"
+    },
+    {
+      "kind": "zip",
+      "display_name": "Season Eight 2026-03-04.zip",
+      "path": "F:/Development/WMTTT4MC-Master/Season Eight SAMPLE\\Season Eight 2026-03-04.zip"
+    },
+    {
+      "kind": "zip",
+      "display_name": "Season Eight 2026-03-27.zip",
+      "path": "F:/Development/WMTTT4MC-Master/Season Eight SAMPLE\\Season Eight 2026-03-27.zip"
+    }
+  ],
+  "results": [
+    {
+      "kind": "cache",
+      "display_name": "Season Eight 2025-10-11.zip",
+      "path": "F:/Development/WMTTT4MC-Master/Season Eight SAMPLE\\Season Eight 2025-10-11_overworld.wmtt4mc",
+      "raw_path": "F:/Development/WMTTT4MC-Master/Season Eight SAMPLE\\Season Eight 2025-10-11.zip",
+      "cache_path": "F:/Development/WMTTT4MC-Master/Season Eight SAMPLE\\Season Eight 2025-10-11_overworld.wmtt4mc",
+      "warning": ""
+    },
+    {
+      "kind": "cache",
+      "display_name": "Season Eight 2025-12-11.zip",
+      "path": "F:/Development/WMTTT4MC-Master/Season Eight SAMPLE\\Season Eight 2025-12-11_overworld.wmtt4mc",
+      "raw_path": "F:/Development/WMTTT4MC-Master/Season Eight SAMPLE\\Season Eight 2025-12-11.zip",
+      "cache_path": "F:/Development/WMTTT4MC-Master/Season Eight SAMPLE\\Season Eight 2025-12-11_overworld.wmtt4mc",
+      "warning": ""
+    },
+    {
+      "kind": "zip",
+      "display_name": "Season Eight 2026-03-04.zip",
+      "path": "F:/Development/WMTTT4MC-Master/Season Eight SAMPLE\\Season Eight 2026-03-04.zip",
+      "raw_path": null,
+      "cache_path": null,
+      "warning": ""
+    },
+    {
+      "kind": "zip",
+      "display_name": "Season Eight 2026-03-27.zip",
+      "path": "F:/Development/WMTTT4MC-Master/Season Eight SAMPLE\\Season Eight 2026-03-27.zip",
+      "raw_path": null,
+      "cache_path": null,
+      "warning": ""
+    }
+  ],
+  "counts": {
+    "raw_sources": 4,
+    "results": 4,
+    "resolved_cache_items": 2,
+    "resolved_raw_items": 2,
+    "with_warnings": 0
+  }
+}
