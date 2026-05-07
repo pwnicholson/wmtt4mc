@@ -12,6 +12,7 @@ import threading
 import multiprocessing
 import json
 import hashlib
+from bisect import bisect_left, bisect_right
 from collections import Counter, deque
 from datetime import datetime
 from functools import lru_cache
@@ -1099,7 +1100,7 @@ def _get_next_build_number() -> str:
     })
     return f"{today}.{build_num:02d}"
 
-APP_VERSION = "1.7.0"
+APP_VERSION = "1.7.1"
 # Build number increments per code change (and can be force-bumped with WMTT4MC_FORCE_BUILD_BUMP=1).
 APP_BUILD = _get_next_build_number()
 APP_ABBR = "WMTT4MC"
@@ -2510,6 +2511,7 @@ class RenderOptions:
     z_min: int = 0
     x_max: int = 0
     z_max: int = 0
+    auto_crop_90: bool = False
 
     # Palette editor override: if use_editor_palette is True, editor_palette
     # is consulted first; blocks missing from it fall back to the default PALETTE.
@@ -2958,55 +2960,61 @@ def classify_block(block, extra_palette: Optional[Dict[str, Tuple[int, int, int]
 
 
 
+_HILLSHADE_SLOPE_CLIP = 12.0
+
+
+def _dimension_height_bounds(dimension: str) -> Tuple[int, int]:
+    dim = str(dimension or "minecraft:overworld").strip().lower()
+    if dim == "minecraft:the_nether":
+        return (0, 128)
+    if dim == "minecraft:the_end":
+        return (-64, 320)
+    return (-64, 320)
+
+
 def compute_hillshade(height: np.ndarray, mode: str = "normal") -> np.ndarray:
-    """Compute hillshade based on slope. Mode controls strength.
-    
-    Returns array of multipliers [0.5, 1.5] where <1 = shadows, >1 = highlights.
+    """Compute hillshade based on a fixed slope scale.
+
+    Using absolute slope clipping instead of per-frame percentile normalization keeps
+    the same terrain relief visually consistent across frames and across runs.
     """
     if mode == "none":
         return np.ones_like(height, dtype=np.float32)
-    
+
     dy, dx = np.gradient(height.astype(np.float32))
-    shade = -(dx * -1.0 + dy * -1.0)
-    smin, smax = np.percentile(shade, 2), np.percentile(shade, 98)
-    if smax - smin < 1e-6:
-        return np.ones_like(height, dtype=np.float32)
-    shade = (shade - smin) / (smax - smin)
-    
+    shade = dx + dy
+    shade = np.clip(shade, -_HILLSHADE_SLOPE_CLIP, _HILLSHADE_SLOPE_CLIP)
+    shade = (shade + _HILLSHADE_SLOPE_CLIP) / (2.0 * _HILLSHADE_SLOPE_CLIP)
+
     if mode == "strong":
-        # Stronger slope effect + curving to make mid-slopes more visible
-        shade = np.power(shade, 0.8)  # Brightens mid-tones
+        shade = np.power(shade, 0.8)
         return (0.5 + 0.8 * shade).astype(np.float32)
-    else:  # "normal"
-        return (0.75 + 0.5 * shade).astype(np.float32)
+    return (0.75 + 0.5 * shade).astype(np.float32)
 
 
-def compute_altitude_tint(height: np.ndarray, mode: str = "normal") -> np.ndarray:
-    """Compute altitude-based color tinting. High = warm, low = cool.
-    
-    Returns RGB tint overlay as float32 [0.7, 1.3] per channel.
+def compute_altitude_tint(height: np.ndarray, mode: str = "normal", dimension: str = "minecraft:overworld") -> np.ndarray:
+    """Compute altitude-based color tinting using fixed dimension bounds.
+
+    This avoids frame-by-frame tint drift caused by percentile normalization.
     """
     if mode == "none":
         return np.ones((*height.shape, 3), dtype=np.float32)
-    
-    h_min, h_max = np.percentile(height, 5), np.percentile(height, 95)
+
+    if mode != "strong":
+        return np.ones((*height.shape, 3), dtype=np.float32)
+
+    h_min, h_max = _dimension_height_bounds(dimension)
     if h_max - h_min < 1e-6:
         return np.ones((*height.shape, 3), dtype=np.float32)
-    
-    h_norm = (height - h_min) / (h_max - h_min)  # [0, 1]
-    h_norm = np.clip(h_norm, 0, 1)
-    
-    if mode == "strong":
-        strength = 0.12  # 0.88 - 1.12 color range
-    else:  # "normal" — no altitude tint, only slope shading
-        return np.ones((*height.shape, 3), dtype=np.float32)
 
-    # High altitude: cool (B+, R-), Low altitude: warm (R+, B-)
+    h_norm = (height.astype(np.float32) - float(h_min)) / float(h_max - h_min)
+    h_norm = np.clip(h_norm, 0.0, 1.0)
+    strength = 0.12
+
     tint = np.ones((*height.shape, 3), dtype=np.float32)
-    tint[..., 0] = 1.0 - strength * (2 * h_norm - 1)     # Red channel: low=warm
-    tint[..., 1] = 1.0                                     # Green: neutral
-    tint[..., 2] = 1.0 + strength * (2 * h_norm - 1)     # Blue channel: high=cool
-    
+    tint[..., 0] = 1.0 - strength * (2.0 * h_norm - 1.0)
+    tint[..., 1] = 1.0
+    tint[..., 2] = 1.0 + strength * (2.0 * h_norm - 1.0)
     return tint.astype(np.float32)
 
 
@@ -3033,6 +3041,44 @@ def _dimension_aliases(dim_id: str) -> List[Any]:
         seen.add(key)
         out.append(a)
     return out
+
+
+_TL_DIM_ID_TO_LABEL: Dict[str, str] = {
+    "minecraft:overworld": "Overworld",
+    "minecraft:the_nether": "The Nether",
+    "minecraft:the_end": "The End",
+}
+
+_TL_DIM_LABEL_TO_ID: Dict[str, str] = {
+    "Overworld": "minecraft:overworld",
+    "The Nether": "minecraft:the_nether",
+    "The End": "minecraft:the_end",
+    # Backward/friendly aliases
+    "Nether": "minecraft:the_nether",
+    "End": "minecraft:the_end",
+}
+
+
+def _timelapse_dimension_to_id(value: Any) -> str:
+    s = str(value or "").strip()
+    if not s:
+        return "minecraft:overworld"
+    if s in _TL_DIM_LABEL_TO_ID:
+        return _TL_DIM_LABEL_TO_ID[s]
+
+    low = s.lower()
+    if low in {"minecraft:overworld", "overworld", "dim0"}:
+        return "minecraft:overworld"
+    if low in {"minecraft:the_nether", "the_nether", "nether", "dim-1"}:
+        return "minecraft:the_nether"
+    if low in {"minecraft:the_end", "the_end", "end", "dim1"}:
+        return "minecraft:the_end"
+    return s if s.startswith("minecraft:") else "minecraft:overworld"
+
+
+def _timelapse_dimension_to_label(value: Any) -> str:
+    dim_id = _timelapse_dimension_to_id(value)
+    return _TL_DIM_ID_TO_LABEL.get(dim_id, "Overworld")
 
 
 def resolve_dimension_id(world: Any, requested: str) -> str:
@@ -3102,6 +3148,244 @@ def world_all_chunk_coords(world: Any, dim_id: str) -> List[Tuple[int, int]]:
         if hasattr(dim, "all_chunk_coords"):
             return list(dim.all_chunk_coords())
     raise AttributeError("Could not enumerate chunks (no supported all_chunk_coords API found).")
+
+
+def choose_auto_crop_sample_indices(total_frames: int) -> List[int]:
+    """Pick sample indices for auto-crop analysis.
+
+    Rules:
+    - If <= 4 frames, sample all frames.
+    - Otherwise sample at least 20% and at least 4 frames.
+    - Always include first, last, and two middle-ish frames.
+    """
+    n = int(total_frames)
+    if n <= 0:
+        return []
+    if n <= 4:
+        return list(range(n))
+
+    k = max(int(np.ceil(n * 0.20)), 4)
+    must = {0, n - 1, n // 3, (2 * n) // 3}
+
+    # Even spacing across the run, then union with mandatory indices.
+    even = np.linspace(0, n - 1, num=min(n, k), dtype=np.int64)
+    out = set(int(v) for v in even.tolist())
+    out.update(int(v) for v in must)
+
+    # Backfill if dedupe reduced count below target.
+    if len(out) < min(n, k):
+        for i in range(n):
+            out.add(i)
+            if len(out) >= min(n, k):
+                break
+
+    return sorted(v for v in out if 0 <= v < n)
+
+
+def _count_in_sorted_range(vals: List[int], lo: int, hi: int) -> int:
+    return max(0, bisect_right(vals, hi) - bisect_left(vals, lo))
+
+
+def solve_auto_crop_bounds_from_chunks(
+    chunk_coords: List[Tuple[int, int]],
+    target_fill: float = 0.90,
+    min_keep_fraction: float = 0.85,
+) -> Optional[Dict[str, Any]]:
+    """Find a crop rectangle from chunk occupancy.
+
+    Strategy:
+    1) use only 4-way (cardinal) connectivity to define contiguous islands,
+    2) choose the single largest island,
+    3) start from that island's bounding rectangle,
+    4) symmetrically grow or shrink the rectangle toward the target empty ratio.
+    """
+    if not chunk_coords:
+        return None
+
+    uniq_set = set((int(cx), int(cz)) for cx, cz in chunk_coords)
+    total_points = len(uniq_set)
+    if total_points <= 0:
+        return None
+
+    target_fill = float(np.clip(target_fill, 0.50, 0.99))
+
+    x_to_z: Dict[int, List[int]] = {}
+    for cx, cz in uniq_set:
+        x_to_z.setdefault(cx, []).append(cz)
+    for x in x_to_z:
+        x_to_z[x].sort()
+
+    def _count_rect_filled(x0: int, x1: int, z0: int, z1: int) -> int:
+        if x1 < x0 or z1 < z0:
+            return 0
+        filled = 0
+        for x in range(x0, x1 + 1):
+            filled += _count_in_sorted_range(x_to_z.get(x, []), z0, z1)
+        return int(filled)
+
+    def _rect_stats(x0: int, x1: int, z0: int, z1: int) -> Dict[str, Any]:
+        area = max(1, (x1 - x0 + 1) * (z1 - z0 + 1))
+        filled = _count_rect_filled(x0, x1, z0, z1)
+        fill_ratio = float(filled) / float(area)
+        return {
+            "chunk_bounds": (int(x0), int(x1), int(z0), int(z1)),
+            "filled_chunks": int(filled),
+            "fill_ratio": float(fill_ratio),
+            "area": int(area),
+        }
+
+    # Build 4-connected components so diagonal-only contact does not merge islands.
+    unvisited = set(uniq_set)
+    components: List[List[Tuple[int, int]]] = []
+    while unvisited:
+        seed = unvisited.pop()
+        stack = [seed]
+        comp: List[Tuple[int, int]] = [seed]
+        while stack:
+            cx, cz = stack.pop()
+            for dx, dz in ((-1, 0), (1, 0), (0, -1), (0, 1)):
+                nb = (cx + dx, cz + dz)
+                if nb in unvisited:
+                    unvisited.remove(nb)
+                    stack.append(nb)
+                    comp.append(nb)
+        components.append(comp)
+
+    if not components:
+        return None
+
+    largest_comp = max(components, key=len)
+
+    xs = [p[0] for p in largest_comp]
+    zs = [p[1] for p in largest_comp]
+    cur_x0, cur_x1 = min(xs), max(xs)
+    cur_z0, cur_z1 = min(zs), max(zs)
+
+    # Keep API compatibility; this mode intentionally prioritizes reaching target fill
+    # over preserving a minimum fraction of island chunks.
+    _ = min_keep_fraction
+
+    chosen = _rect_stats(cur_x0, cur_x1, cur_z0, cur_z1)
+    if float(chosen["fill_ratio"]) < target_fill:
+        while cur_x0 < cur_x1 or cur_z0 < cur_z1:
+            width = (cur_x1 - cur_x0 + 1)
+            height = (cur_z1 - cur_z0 + 1)
+
+            side_candidates: List[Tuple[float, str]] = []  # (empty_ratio_on_edge, side)
+
+            if width > 1:
+                left_total = height
+                left_filled = _count_rect_filled(cur_x0, cur_x0, cur_z0, cur_z1)
+                left_empty_ratio = 1.0 - (float(left_filled) / float(max(1, left_total)))
+                side_candidates.append((left_empty_ratio, "left"))
+
+                right_total = height
+                right_filled = _count_rect_filled(cur_x1, cur_x1, cur_z0, cur_z1)
+                right_empty_ratio = 1.0 - (float(right_filled) / float(max(1, right_total)))
+                side_candidates.append((right_empty_ratio, "right"))
+
+            if height > 1:
+                top_total = width
+                top_filled = _count_rect_filled(cur_x0, cur_x1, cur_z0, cur_z0)
+                top_empty_ratio = 1.0 - (float(top_filled) / float(max(1, top_total)))
+                side_candidates.append((top_empty_ratio, "top"))
+
+                bottom_total = width
+                bottom_filled = _count_rect_filled(cur_x0, cur_x1, cur_z1, cur_z1)
+                bottom_empty_ratio = 1.0 - (float(bottom_filled) / float(max(1, bottom_total)))
+                side_candidates.append((bottom_empty_ratio, "bottom"))
+
+            if not side_candidates:
+                break
+
+            # Contract the emptiest edge by one chunk.
+            side_candidates.sort(key=lambda t: t[0], reverse=True)
+            _edge_empty, side = side_candidates[0]
+            if side == "left":
+                cur_x0 += 1
+            elif side == "right":
+                cur_x1 -= 1
+            elif side == "top":
+                cur_z0 += 1
+            else:
+                cur_z1 -= 1
+
+            if cur_x0 > cur_x1 or cur_z0 > cur_z1:
+                break
+
+            chosen = _rect_stats(cur_x0, cur_x1, cur_z0, cur_z1)
+            if float(chosen["fill_ratio"]) >= target_fill:
+                break
+
+    cx_min, cx_max, cz_min, cz_max = chosen["chunk_bounds"]
+    result = {
+        "chunk_bounds": (cx_min, cx_max, cz_min, cz_max),
+        "filled_chunks": int(chosen["filled_chunks"]),
+        "total_chunks": int(total_points),
+        "fill_ratio": float(chosen["fill_ratio"]),
+        "block_bounds": (
+        int(cx_min * 16),
+        int((cx_max + 1) * 16 - 1),
+        int(cz_min * 16),
+        int((cz_max + 1) * 16 - 1),
+        ),
+    }
+    return result
+
+
+def snapshot_loaded_chunk_coords(
+    snapshot: SnapshotInput,
+    dimension: str,
+    log_cb: Optional[Callable[[str], None]] = None,
+    cancel_event: Optional[threading.Event] = None,
+) -> List[Tuple[int, int]]:
+    """Return loaded chunk coordinates for a snapshot quickly.
+
+    For caches, this reads chunk rows directly.
+    For raw backups/world folders, this enumerates loaded chunk coords from Amulet
+    without scanning every block column.
+    """
+    if cancel_event is not None and cancel_event.is_set():
+        raise CancelledError("Cancelled during auto-crop sampling.")
+
+    src = snapshot.path
+    if is_cache_file(src):
+        coords: List[Tuple[int, int]] = []
+        for cx, cz, _surface_payload, _deep_payload in iter_chunk_rows(src):
+            coords.append((int(cx), int(cz)))
+        return coords
+
+    source_path = snapshot.raw_path or snapshot.path
+    if amulet is None or not hasattr(amulet, "load_level"):
+        raise RuntimeError("Amulet API unavailable. Cannot auto-crop from raw backups.")
+
+    tmpdir = tempfile.mkdtemp(prefix="wmtt4mc_autocrop_")
+    world0 = None
+    try:
+        _tmp_root, candidates = _resolve_snapshot_world_roots(source_path, tmpdir)
+        if not candidates:
+            raise RuntimeError("Could not find a world folder (no level.dat found).")
+
+        world_root = sorted(
+            [(r, _score_world_root_path(r)) for r in candidates],
+            key=lambda t: t[1], reverse=True,
+        )[0][0]
+
+        world0 = amulet.load_level(world_root)
+        dim_id = resolve_dimension_id(world0, dimension)
+        coords = world_all_chunk_coords(world0, dim_id)
+        return [(int(cx), int(cz)) for cx, cz in coords]
+    finally:
+        try:
+            if world0 is not None:
+                world0.close()
+        except Exception:
+            pass
+        try:
+            _safe_cleanup_dir(tmpdir)
+        except Exception:
+            if log_cb is not None:
+                log_cb("[AUTO CROP] Cleanup warning: temporary sampling folder could not be fully removed.")
 
 
 def _is_chunk_missing_exc(e: Exception) -> bool:
@@ -4117,7 +4401,7 @@ def render_cached_world_map(
 
     if opt.hillshade_mode != "none":
         shade = compute_hillshade(hmap, opt.hillshade_mode)
-        altitude = compute_altitude_tint(hmap, opt.hillshade_mode)
+        altitude = compute_altitude_tint(hmap, opt.hillshade_mode, opt.dimension)
         rgb_f = rgb.astype(np.float32) * shade[..., None] * altitude
         rgb = np.clip(rgb_f, 0, 255).astype(np.uint8)
 
@@ -4147,6 +4431,29 @@ def render_snapshot_input(
     debug_context_header: str = "",
     stage_cb: Optional[Callable[[str], None]] = None,
 ) -> Tuple[int, int, int, int, int, int, int, int, int]:
+    def _render_empty_cropped_frame() -> tuple:
+        if not opt.limit_enabled:
+            raise RuntimeError("Cannot render empty cropped frame without crop bounds.")
+
+        x1 = int(min(opt.x_min, opt.x_max))
+        x2 = int(max(opt.x_min, opt.x_max))
+        z1 = int(min(opt.z_min, opt.z_max))
+        z2 = int(max(opt.z_min, opt.z_max))
+        width_blocks = max(1, x2 - x1 + 1)
+        height_blocks = max(1, z2 - z1 + 1)
+        target = parse_target_preset(opt.target_preset)
+        bpp = compute_blocks_per_pixel(width_blocks, height_blocks, target)
+        w_px = int(np.ceil(width_blocks / bpp))
+        h_px = int(np.ceil(height_blocks / bpp))
+        rgb = np.zeros((h_px, w_px, 3), dtype=np.uint8)
+        img = Image.fromarray(rgb, mode="RGB")
+        img = fit_to_target(img, target)
+        img_w, img_h = img.size
+        _atomic_save_png(img, out_png, log=log_cb)
+        if log_cb is not None:
+            log_cb("[CACHE] No chunks in selected crop area for this frame; wrote empty cropped frame from cache context.")
+        return (x1, x2, z1, z2, 0, 0, 0, int(w_px * h_px), bpp, img_w, img_h)
+
     source_path = snapshot.path
     if is_cache_file(source_path):
         try:
@@ -4207,32 +4514,13 @@ def render_snapshot_input(
                         stage_cb=stage_cb,
                     )
             # If cache exists but has no chunks for the selected crop area,
-            # try raw source (if available) instead of failing the frame.
+            # keep the frame cache-backed and emit an empty cropped frame. This
+            # is especially important for auto-crop runs where early/smaller
+            # frames may legitimately have no explored chunks inside the crop
+            # chosen from the largest frame.
             if "no cached chunks found" in exc_text:
-                raw_src = snapshot.raw_path
-                if raw_src and (raw_src.lower().endswith(".zip") or is_world_folder(raw_src)):
-                    if log_cb:
-                        log_cb(
-                            f"[FALLBACK] Cache has no chunks for selected area. "
-                            f"Rendering directly from: {os.path.basename(raw_src)}"
-                        )
-                    fallback_snap = SnapshotInput(
-                        kind=snapshot.kind,
-                        path=raw_src,
-                        display_name=snapshot.display_name,
-                        sort_name=snapshot.sort_name,
-                    )
-                    return render_snapshot_input(
-                        fallback_snap,
-                        out_png,
-                        opt,
-                        log_cb=log_cb,
-                        progress_cb=progress_cb,
-                        cancel_event=cancel_event,
-                        debug_snapshot_path=debug_snapshot_path,
-                        debug_context_header=debug_context_header,
-                        stage_cb=stage_cb,
-                    )
+                if opt.limit_enabled:
+                    return _render_empty_cropped_frame()
             raise
 
     if stage_cb is not None:
@@ -4509,7 +4797,7 @@ def render_world_map(
     
             if opt.hillshade_mode != "none":
                 shade = compute_hillshade(hmap, opt.hillshade_mode)
-                altitude = compute_altitude_tint(hmap, opt.hillshade_mode)
+                altitude = compute_altitude_tint(hmap, opt.hillshade_mode, opt.dimension)
                 rgb_f = rgb.astype(np.float32) * shade[..., None] * altitude
                 rgb = np.clip(rgb_f, 0, 255).astype(np.uint8)
     
@@ -4655,7 +4943,7 @@ def render_one_chunk_png(
 
         if opt.hillshade_mode != "none":
             shade = compute_hillshade(hmap, opt.hillshade_mode)
-            altitude = compute_altitude_tint(hmap, opt.hillshade_mode)
+            altitude = compute_altitude_tint(hmap, opt.hillshade_mode, opt.dimension)
             rgb_f = rgb.astype(np.float32) * shade[..., None] * altitude
             rgb = np.clip(rgb_f, 0, 255).astype(np.uint8)
 
@@ -5085,7 +5373,9 @@ def worker_run(snapshots: List[SnapshotInput],
         log(f"Target: {opt.target_preset} | performance mode=automatic")
         if output_cache_mode:
             log(f"Output cache mode: {output_cache_mode}")
-        if opt.limit_enabled:
+        if opt.auto_crop_90:
+            log("Crop: auto crop to 90% rendered areas (sampling pending)")
+        elif opt.limit_enabled:
             log(
                 f"Crop: enabled x=[{opt.x_min},{opt.x_max}] z=[{opt.z_min},{opt.z_max}]"
             )
@@ -5108,6 +5398,92 @@ def worker_run(snapshots: List[SnapshotInput],
                     log(str(line))
                 except Exception:
                     pass
+            log("-" * 60)
+
+        if opt.auto_crop_90:
+            sample_indices = choose_auto_crop_sample_indices(len(snapshots))
+            sample_total = len(sample_indices)
+            log(
+                f"[AUTO CROP] Sampling {sample_total}/{len(snapshots)} frame(s) "
+                "to determine a 90% rendered-area crop."
+            )
+            try:
+                sample_names = ", ".join(snapshots[i].display_name for i in sample_indices)
+                log(f"[AUTO CROP] Sample set: {sample_names}")
+            except Exception:
+                pass
+
+            sampled_sets: List[Tuple[int, SnapshotInput, List[Tuple[int, int]]]] = []
+            for sample_i, snap_idx in enumerate(sample_indices, start=1):
+                if cancel_event.is_set():
+                    raise CancelledError("Cancelled during auto-crop sampling.")
+
+                snap = snapshots[snap_idx]
+                status(
+                    f"Auto crop sampling ({sample_i}/{sample_total}): {snap.display_name}",
+                    "Scanning loaded chunk map…",
+                )
+                progress(((sample_i - 1) / max(1, sample_total)) * 100.0)
+
+                coords = snapshot_loaded_chunk_coords(
+                    snap,
+                    opt.dimension,
+                    log_cb=lambda m: log(str(m)),
+                    cancel_event=cancel_event,
+                )
+                sampled_sets.append((snap_idx, snap, coords))
+                log(
+                    f"[AUTO CROP] {sample_i:02d}/{sample_total:02d} "
+                    f"{snap.display_name}: {len(coords)} loaded chunk(s)"
+                )
+
+            non_empty = [t for t in sampled_sets if t[2]]
+            if non_empty:
+                # User preference: establish crop from the largest explored frame,
+                # then trim sparse tails to hit high fill ratio.
+                largest_idx, largest_snap, largest_coords = max(non_empty, key=lambda t: len(t[2]))
+                solved = solve_auto_crop_bounds_from_chunks(
+                    largest_coords,
+                    target_fill=0.90,
+                    min_keep_fraction=0.85,
+                )
+                if solved is not None:
+                    bx0, bx1, bz0, bz1 = solved["block_bounds"]
+                    opt.limit_enabled = True
+                    opt.x_min = int(bx0)
+                    opt.x_max = int(bx1)
+                    opt.z_min = int(bz0)
+                    opt.z_max = int(bz1)
+                    log(
+                        f"[AUTO CROP] Largest sampled frame: {largest_snap.display_name} "
+                        f"({len(largest_coords)} chunk(s))."
+                    )
+                    log(
+                        f"[AUTO CROP] Applied crop x=[{opt.x_min},{opt.x_max}] z=[{opt.z_min},{opt.z_max}] "
+                        f"fill={solved['fill_ratio'] * 100.0:.1f}% "
+                        f"kept={solved['filled_chunks']}/{solved['total_chunks']} chunks"
+                    )
+                    msgq.put((
+                        "auto_crop_result",
+                        (
+                            f"Auto crop selected: x=[{opt.x_min},{opt.x_max}] z=[{opt.z_min},{opt.z_max}]",
+                            f"Based on {largest_snap.display_name}; fill {solved['fill_ratio'] * 100.0:.1f}%, kept {solved['filled_chunks']}/{solved['total_chunks']} chunks",
+                        ),
+                    ))
+                    status(
+                        "Auto crop completed.",
+                        f"x=[{opt.x_min},{opt.x_max}] z=[{opt.z_min},{opt.z_max}]",
+                    )
+                else:
+                    opt.limit_enabled = False
+                    msgq.put(("auto_crop_result", ("Auto crop could not determine bounds.", "Continuing without crop.")))
+                    log("[AUTO CROP] Could not derive crop bounds; continuing without crop.")
+            else:
+                opt.limit_enabled = False
+                msgq.put(("auto_crop_result", ("Auto crop found no loaded chunks in sampled frames.", "Continuing without crop.")))
+                log("[AUTO CROP] No loaded chunks found in sampled frames; continuing without crop.")
+
+            progress(0.0)
             log("-" * 60)
 
         requested_cache_mode = str(output_cache_mode or "").strip().lower()
@@ -6800,7 +7176,9 @@ def preflight_report_worker(
         log(f"Dimension: {opt.dimension} | y=[{opt.y_min},{opt.y_max}]")
         log(f"Target: {opt.target_preset}")
         log(f"Output cache mode: {output_cache_mode or '(unspecified)'}")
-        if opt.limit_enabled:
+        if opt.auto_crop_90:
+            log("Crop: auto crop to 90% rendered areas")
+        elif opt.limit_enabled:
             log(f"Crop: enabled x=[{opt.x_min},{opt.x_max}] z=[{opt.z_min},{opt.z_max}]")
         else:
             log("Crop: disabled")
@@ -6913,6 +7291,7 @@ def preflight_report_worker(
                 "y_max": opt.y_max,
                 "target": opt.target_preset,
                 "output_cache_mode": output_cache_mode,
+                "auto_crop_90": bool(opt.auto_crop_90),
                 "crop_enabled": bool(opt.limit_enabled),
                 "crop": {
                     "x_min": opt.x_min,
@@ -7065,14 +7444,17 @@ class App(tk.Tk):
         # --- Timelapse tab vars ---
         self.folder_var = tk.StringVar()
         self.out_var = tk.StringVar(value=os.path.join(os.path.expanduser("~"), "WMTT4MC_Output"))
-        self.dimension_var = tk.StringVar(value="minecraft:overworld")
+        self.dimension_var = tk.StringVar(value="Overworld")
 
         # Crop/limit (must be initialized before use)
         self.limit_enabled_var = tk.BooleanVar(value=False)
+        self.auto_crop_90_var = tk.BooleanVar(value=False)
+        self.auto_crop_result_var = tk.StringVar(value="")
         self.xmin_var = tk.IntVar(value=0)
         self.zmin_var = tk.IntVar(value=0)
         self.xmax_var = tk.IntVar(value=0)
         self.zmax_var = tk.IntVar(value=0)
+        self._manual_crop_widgets: List[Any] = []
 
         self.target_var = tk.StringVar(value="1080p (1920x1080)")
         self.custom_w_var = tk.IntVar(value=1920)
@@ -7217,7 +7599,7 @@ class App(tk.Tk):
             tl = cfg.get("timelapse", {}) if isinstance(cfg.get("timelapse", {}), dict) else {}
             crop_cfg = tl.get("crop", {}) if isinstance(tl.get("crop", {}), dict) else {}
 
-            self.dimension_var.set(tl.get("dimension", self.dimension_var.get()))
+            self.dimension_var.set(_timelapse_dimension_to_label(tl.get("dimension", self.dimension_var.get())))
             self.target_var.set(tl.get("target", self.target_var.get()))
             self.custom_w_var.set(int(tl.get("custom_w", self.custom_w_var.get())))
             self.custom_h_var.set(int(tl.get("custom_h", self.custom_h_var.get())))
@@ -7240,6 +7622,7 @@ class App(tk.Tk):
             self.debug_blocks_var.set(bool(tl.get("debug_blocks", self.debug_blocks_var.get())))
 
             self.limit_enabled_var.set(bool(crop_cfg.get("enabled", self.limit_enabled_var.get())))
+            self.auto_crop_90_var.set(bool(crop_cfg.get("auto_crop_90", self.auto_crop_90_var.get())))
             self.xmin_var.set(int(crop_cfg.get("x_min", self.xmin_var.get())))
             self.xmax_var.set(int(crop_cfg.get("x_max", self.xmax_var.get())))
             self.zmin_var.set(int(crop_cfg.get("z_min", self.zmin_var.get())))
@@ -7253,7 +7636,7 @@ class App(tk.Tk):
             cfg["last_input_dir"] = self.folder_var.get().strip()
             cfg["last_output_dir"] = self.out_var.get().strip()
             cfg["timelapse"] = {
-                "dimension": self.dimension_var.get(),
+                "dimension": _timelapse_dimension_to_id(self.dimension_var.get()),
                 "target": self.target_var.get(),
                 "custom_w": int(self.custom_w_var.get()),
                 "custom_h": int(self.custom_h_var.get()),
@@ -7273,6 +7656,7 @@ class App(tk.Tk):
                 "use_editor_palette": bool(self.use_editor_palette_var.get()),
                 "crop": {
                     "enabled": bool(self.limit_enabled_var.get()),
+                    "auto_crop_90": bool(self.auto_crop_90_var.get()),
                     "x_min": int(self.xmin_var.get()),
                     "x_max": int(self.xmax_var.get()),
                     "z_min": int(self.zmin_var.get()),
@@ -7369,7 +7753,7 @@ class App(tk.Tk):
 
         ttk.Label(opts, text="Dimension:").grid(row=0, column=0, sticky="w", **pad)
         ttk.Combobox(opts, textvariable=self.dimension_var,
-                     values=["minecraft:overworld", "minecraft:the_nether", "minecraft:the_end"],
+                     values=["Overworld", "The Nether", "The End"],
                      state="readonly", style="ActiveReadonly.TCombobox", width=22).grid(row=0, column=1, sticky="w", **pad)
 
         ttk.Label(opts, text="Video resolution:").grid(row=0, column=2, sticky="w", **pad)
@@ -7405,13 +7789,42 @@ class App(tk.Tk):
         crop = ttk.LabelFrame(parent, text="Crop / limit render area (block coordinates)")
         crop.pack(fill="x", padx=10, pady=6)
 
-        ttk.Checkbutton(crop, text="Enable crop", variable=self.limit_enabled_var).grid(row=0, column=0, sticky="w", **pad)
-        ttk.Label(crop, text="NW (x,z):").grid(row=0, column=1, sticky="w", **pad)
-        ttk.Entry(crop, textvariable=self.xmin_var, width=10).grid(row=0, column=2, sticky="w", **pad)
-        ttk.Entry(crop, textvariable=self.zmin_var, width=10).grid(row=0, column=3, sticky="w", **pad)
-        ttk.Label(crop, text="SE (x,z):").grid(row=0, column=4, sticky="w", **pad)
-        ttk.Entry(crop, textvariable=self.xmax_var, width=10).grid(row=0, column=5, sticky="w", **pad)
-        ttk.Entry(crop, textvariable=self.zmax_var, width=10).grid(row=0, column=6, sticky="w", **pad)
+        self.crop_enable_cb = ttk.Checkbutton(crop, text="Enable crop", variable=self.limit_enabled_var)
+        self.crop_enable_cb.grid(row=0, column=0, sticky="w", **pad)
+        crop_nw = ttk.Label(crop, text="NW (x,z):")
+        crop_nw.grid(row=0, column=1, sticky="w", **pad)
+        crop_xmin = ttk.Entry(crop, textvariable=self.xmin_var, width=10)
+        crop_xmin.grid(row=0, column=2, sticky="w", **pad)
+        crop_zmin = ttk.Entry(crop, textvariable=self.zmin_var, width=10)
+        crop_zmin.grid(row=0, column=3, sticky="w", **pad)
+        crop_se = ttk.Label(crop, text="SE (x,z):")
+        crop_se.grid(row=0, column=4, sticky="w", **pad)
+        crop_xmax = ttk.Entry(crop, textvariable=self.xmax_var, width=10)
+        crop_xmax.grid(row=0, column=5, sticky="w", **pad)
+        crop_zmax = ttk.Entry(crop, textvariable=self.zmax_var, width=10)
+        crop_zmax.grid(row=0, column=6, sticky="w", **pad)
+        self._manual_crop_widgets = [
+            self.crop_enable_cb,
+            crop_nw,
+            crop_xmin,
+            crop_zmin,
+            crop_se,
+            crop_xmax,
+            crop_zmax,
+        ]
+
+        self.auto_crop_cb = ttk.Checkbutton(
+            crop,
+            text="Auto crop to 90% rendered areas",
+            variable=self.auto_crop_90_var,
+        )
+        self.auto_crop_cb.grid(row=1, column=0, columnspan=4, sticky="w", **pad)
+        ttk.Label(
+            crop,
+            textvariable=self.auto_crop_result_var,
+            foreground="#666666",
+            justify="left",
+        ).grid(row=2, column=0, columnspan=7, sticky="w", **pad)
 
         # Output naming / frames retention
         outopts = ttk.LabelFrame(parent, text="Output")
@@ -7455,7 +7868,7 @@ class App(tk.Tk):
         self.cache_dim_checks = []
         for _var, _lbl in [
             (self.cache_dim_overworld_var, "Overworld"),
-            (self.cache_dim_nether_var, "Nether"),
+            (self.cache_dim_nether_var, "The Nether"),
             (self.cache_dim_end_var, "The End"),
         ]:
             _cb = ttk.Checkbutton(dim_check_frame, text=_lbl, variable=_var)
@@ -7525,7 +7938,10 @@ class App(tk.Tk):
         self._sync_custom()
         self._sync_debug_button_visibility()
         self.debug_blocks_var.trace_add("write", lambda *_: self._sync_debug_button_visibility())
+        self.auto_crop_90_var.trace_add("write", lambda *_: self._sync_manual_crop_controls())
+        self.auto_crop_90_var.trace_add("write", lambda *_: self._sync_cache_controls_for_crop())
         self.limit_enabled_var.trace_add("write", lambda *_: self._sync_cache_controls_for_crop())
+        self._sync_manual_crop_controls()
         self._sync_cache_controls_for_crop()
 
     def _build_single_tab(self, parent):
@@ -8625,8 +9041,19 @@ class App(tk.Tk):
     def _is_original_timelapse_target(self) -> bool:
         return self.target_var.get().strip().lower().startswith("original")
 
+    def _sync_manual_crop_controls(self):
+        auto_on = bool(self.auto_crop_90_var.get())
+        state = "disabled" if auto_on else "normal"
+        if not auto_on:
+            self.auto_crop_result_var.set("")
+        for w in self._manual_crop_widgets:
+            try:
+                w.configure(state=state)
+            except Exception:
+                pass
+
     def _sync_cache_controls_for_crop(self):
-        crop_enabled = bool(self.limit_enabled_var.get())
+        crop_enabled = bool(self.limit_enabled_var.get()) and (not bool(self.auto_crop_90_var.get()))
         non_original_target = not self._is_original_timelapse_target()
 
         if crop_enabled:
@@ -8970,7 +9397,7 @@ class App(tk.Tk):
 
     def _gather_options(self) -> RenderOptions:
         opt = RenderOptions()
-        opt.dimension = self.dimension_var.get()
+        opt.dimension = _timelapse_dimension_to_id(self.dimension_var.get())
         opt.y_min = int(self.ymin_var.get())
         opt.y_max = int(self.ymax_var.get())
         opt.skip_water = bool(self.skip_water_var.get())
@@ -8989,7 +9416,8 @@ class App(tk.Tk):
         opt.aggressive_mode = False
         opt.debug_block_samples = bool(self.debug_blocks_var.get())
 
-        opt.limit_enabled = bool(self.limit_enabled_var.get())
+        opt.auto_crop_90 = bool(self.auto_crop_90_var.get())
+        opt.limit_enabled = bool(self.limit_enabled_var.get()) and (not opt.auto_crop_90)
         opt.x_min = int(self.xmin_var.get())
         opt.z_min = int(self.zmin_var.get())
         opt.x_max = int(self.xmax_var.get())
@@ -9010,7 +9438,7 @@ class App(tk.Tk):
             os.makedirs(out, exist_ok=True)
         except Exception:
             return "Could not create/access output folder."
-        sources = find_snapshot_sources(folder, dimension=self.dimension_var.get())
+        sources = find_snapshot_sources(folder, dimension=_timelapse_dimension_to_id(self.dimension_var.get()))
         if not sources:
             return "No supported backup or cache files were found in the selected folder."
         try:
@@ -9029,7 +9457,7 @@ class App(tk.Tk):
 
         folder = self.folder_var.get().strip()
         out_dir = self.out_var.get().strip()
-        snapshots = find_snapshot_sources(folder, dimension=self.dimension_var.get())  # always includes caches, ZIPs, and world folders
+        snapshots = find_snapshot_sources(folder, dimension=_timelapse_dimension_to_id(self.dimension_var.get()))  # always includes caches, ZIPs, and world folders
         snapshots = self._prompt_cache_conflicts(snapshots)
         if snapshots is None:
             return
@@ -9043,6 +9471,7 @@ class App(tk.Tk):
         self.cancel_event.clear()
         self.current_task = "timelapse"
         self.stop_control["mode"] = "partial_gif"
+        self.auto_crop_result_var.set("")
         self._set_busy(True)
         self._set_progress(0.0)
         self._set_status("Starting…", "")
@@ -9058,23 +9487,25 @@ class App(tk.Tk):
             discovery_lines.append(text)
             self._log(text, "timelapse")
 
-        _, _diag = discover_with_diagnostics(folder, log_cb=_diag_log, dimension=self.dimension_var.get())
+        _, _diag = discover_with_diagnostics(folder, log_cb=_diag_log, dimension=_timelapse_dimension_to_id(self.dimension_var.get()))
         self._log(f"Output cache mode: {self.cache_mode_var.get()}", "timelapse")
         
-        self._log("Note: .wmtt4mc sidecar caches are only created by 'Build / update caches'.", "timelapse")
+        self._log("Note: output cache mode can prebuild .wmtt4mc sidecar caches before rendering.", "timelapse")
         for snapshot in snapshots:
             if snapshot.warning:
                 self._log(f"  ⚠ {snapshot.warning}", "timelapse")
 
         # Start worker
         # --- Crop validation ---
-        if not self.validate_crop_area(
-            self.xmin_var.get(), self.xmax_var.get(), self.zmin_var.get(), self.zmax_var.get(),
-            self.limit_enabled_var.get(), self.target_var.get(), parent=self
-        ):
-            self._set_busy(False)
-            self._set_status("Render cancelled.", "Invalid crop area.")
-            return
+        manual_crop_enabled = bool(self.limit_enabled_var.get()) and (not bool(self.auto_crop_90_var.get()))
+        if manual_crop_enabled:
+            if not self.validate_crop_area(
+                self.xmin_var.get(), self.xmax_var.get(), self.zmin_var.get(), self.zmax_var.get(),
+                True, self.target_var.get(), parent=self
+            ):
+                self._set_busy(False)
+                self._set_status("Render cancelled.", "Invalid crop area.")
+                return
 
         def runner():
             worker_run(
@@ -9101,12 +9532,12 @@ class App(tk.Tk):
         """
         _DIM_OPTIONS = [
             ("minecraft:overworld", "Overworld"),
-            ("minecraft:the_nether", "Nether"),
+            ("minecraft:the_nether", "The Nether"),
             ("minecraft:the_end", "The End"),
         ]
 
         result: List[str] = []
-        default_dim = (self.dimension_var.get() or "minecraft:overworld").strip()
+        default_dim = _timelapse_dimension_to_id(self.dimension_var.get())
 
         dlg = tk.Toplevel(self)
         dlg.title("Select dimensions to cache")
@@ -9401,6 +9832,12 @@ class App(tk.Tk):
                     self._set_status(a, b)
                 elif kind == "progress":
                     self._set_progress(payload)
+                elif kind == "auto_crop_result":
+                    line1, line2 = payload
+                    text = normalize_log_text(str(line1))
+                    if line2:
+                        text += "\n" + normalize_log_text(str(line2))
+                    self.auto_crop_result_var.set(text)
                 elif kind == "done":
                     self._set_busy(False)
                     self.current_task = None
@@ -9494,4 +9931,5 @@ def main():
 
 
 if __name__ == "__main__":
+    multiprocessing.freeze_support()
     main()

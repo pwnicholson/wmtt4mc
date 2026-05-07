@@ -1,5 +1,21 @@
 # CHANGELOG
 
+## [1.7.1] - 2026-05-07
+
+### Added
+- **Auto-crop mode**: New `Auto crop to 90% rendered areas` option that samples frames, finds rendered chunk coverage, and applies an automatic crop.
+- **Auto-crop result summary in UI**: Crop section now shows the final computed bounds after sampling.
+
+### Fixed
+- **Frozen Windows build worker relaunch issue**: Added `multiprocessing.freeze_support()` at app startup to prevent extra GUI relaunches in packaged builds.
+- **Hill shading consistency**: Replaced per-frame percentile normalization with fixed absolute scaling so shading/tint remains stable across frames and runs.
+- **Cache + crop fallback behavior**: When a cache-backed frame has no chunks inside the selected crop, rendering now outputs an empty cropped frame instead of falling back to raw scan/render.
+- **Auto-crop connectivity and contraction logic**: Auto-crop now uses cardinal connectivity and contracts the emptiest edge iteratively until the target fill threshold is reached.
+
+### Changed
+- Timelapse Dimension dropdown now shows friendly labels (`Overworld`, `The Nether`, `The End`) while preserving canonical internal dimension IDs.
+- Output cache dimension label updated from `Nether` to `The Nether`.
+
 ## [1.7.0] - 2026-05-05
 
 ### Added
