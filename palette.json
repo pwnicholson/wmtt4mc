@@ -322,8 +322,8 @@
       39
     ],
     "minecraft:beetroots_stage3": [
+      55,
       93,
-      92,
       30
     ],
     "minecraft:bell_bottom": [
@@ -2302,9 +2302,9 @@
       133
     ],
     "minecraft:grass_block_top": [
-      147,
-      147,
-      147
+      127,
+      178,
+      56
     ],
     "minecraft:gravel": [
       132,
@@ -3177,9 +3177,9 @@
       85
     ],
     "minecraft:oak_leaves": [
-      144,
-      144,
-      144
+      9,
+      99,
+      35
     ],
     "minecraft:oak_log": [
       109,
@@ -4352,9 +4352,9 @@
       108
     ],
     "minecraft:short_grass": [
-      146,
-      145,
-      146
+      124,
+      169,
+      61
     ],
     "minecraft:shroomlight": [
       241,
@@ -4927,9 +4927,9 @@
       128
     ],
     "minecraft:tall_grass_top": [
+      98,
       151,
-      149,
-      151
+      24
     ],
     "minecraft:tall_seagrass_bottom": [
       45,
@@ -5297,19 +5297,19 @@
       121
     ],
     "minecraft:water_flow": [
-      169,
-      169,
-      169
+      104,
+      151,
+      247
     ],
     "minecraft:water_overlay": [
-      165,
-      165,
-      165
+      67,
+      124,
+      243
     ],
     "minecraft:water_still": [
-      177,
-      177,
-      177
+      67,
+      124,
+      243
     ],
     "minecraft:weathered_chiseled_copper": [
       105,
@@ -5452,14 +5452,14 @@
       206
     ],
     "minecraft:white_concrete": [
-      207,
-      213,
-      214
+      242,
+      241,
+      241
     ],
     "minecraft:white_concrete_powder": [
-      226,
-      227,
-      228
+      238,
+      237,
+      237
     ],
     "minecraft:white_glazed_terracotta": [
       188,
@@ -5467,9 +5467,9 @@
       203
     ],
     "minecraft:white_shulker_box": [
-      216,
-      221,
-      221
+      245,
+      245,
+      245
     ],
     "minecraft:white_stained_glass": [
       255,
@@ -5482,19 +5482,19 @@
       246
     ],
     "minecraft:white_terracotta": [
-      210,
-      178,
-      161
+      240,
+      221,
+      211
     ],
     "minecraft:white_tulip": [
-      94,
-      165,
-      71
+      226,
+      229,
+      225
     ],
     "minecraft:white_wool": [
-      234,
-      236,
-      237
+      238,
+      238,
+      238
     ],
     "minecraft:wildflowers": [
       237,
@@ -5560,6 +5560,296 @@
       249,
       198,
       40
+    ],
+    "minecraft:acacia_fence": [
+      168,
+      90,
+      50
+    ],
+    "minecraft:acacia_slab": [
+      168,
+      90,
+      50
+    ],
+    "minecraft:acacia_stairs": [
+      168,
+      90,
+      50
+    ],
+    "minecraft:acacia_wall_sign": [
+      168,
+      90,
+      50
+    ],
+    "minecraft:basalt": [
+      81,
+      81,
+      86
+    ],
+    "minecraft:bee_nest": [
+      202,
+      160,
+      75
+    ],
+    "minecraft:beehive": [
+      181,
+      146,
+      90
+    ],
+    "minecraft:beetroots": [
+      55,
+      93,
+      30
+    ],
+    "minecraft:big_dripleaf": [
+      112,
+      142,
+      52
+    ],
+    "minecraft:birch_fence": [
+      192,
+      175,
+      121
+    ],
+    "minecraft:birch_fence_gate": [
+      192,
+      175,
+      121
+    ],
+    "minecraft:birch_hanging_sign": [
+      192,
+      175,
+      121
+    ],
+    "minecraft:birch_sign": [
+      192,
+      175,
+      121
+    ],
+    "minecraft:birch_slab": [
+      192,
+      175,
+      121
+    ],
+    "minecraft:birch_wall_sign": [
+      192,
+      175,
+      121
+    ],
+    "minecraft:black_banner": [
+      0,
+      0,
+      0
+    ],
+    "minecraft:blue_banner": [
+      51,
+      76,
+      178
+    ],
+    "minecraft:brown_banner": [
+      102,
+      76,
+      51
+    ],
+    "minecraft:concrete_powder|white": [
+      238,
+      237,
+      237
+    ],
+    "minecraft:concrete|white": [
+      242,
+      241,
+      241
+    ],
+    "minecraft:dark_oak_fence": [
+      67,
+      43,
+      20
+    ],
+    "minecraft:dark_oak_fence_gate": [
+      67,
+      43,
+      20
+    ],
+    "minecraft:dark_oak_sign": [
+      67,
+      43,
+      20
+    ],
+    "minecraft:dark_oak_slab": [
+      67,
+      43,
+      20
+    ],
+    "minecraft:dark_oak_stairs": [
+      67,
+      43,
+      20
+    ],
+    "minecraft:dark_oak_wall_sign": [
+      67,
+      43,
+      20
+    ],
+    "minecraft:glazed_terracotta|black": [
+      58,
+      58,
+      58
+    ],
+    "minecraft:leaves|oak": [
+      9,
+      99,
+      35
+    ],
+    "minecraft:leaves|pale_oak": [
+      232,
+      224,
+      224
+    ],
+    "minecraft:light_blue_banner": [
+      102,
+      153,
+      216
+    ],
+    "minecraft:magenta_banner": [
+      178,
+      76,
+      216
+    ],
+    "minecraft:orange_banner": [
+      216,
+      127,
+      51
+    ],
+    "minecraft:pale_oak_fence_gate": [
+      251,
+      239,
+      236
+    ],
+    "minecraft:pale_oak_slab": [
+      251,
+      239,
+      236
+    ],
+    "minecraft:pale_oak_stairs": [
+      251,
+      239,
+      236
+    ],
+    "minecraft:pale_oak_wall_sign": [
+      251,
+      239,
+      236
+    ],
+    "minecraft:pink_banner": [
+      242,
+      127,
+      165
+    ],
+    "minecraft:plant|grass": [
+      120,
+      168,
+      53
+    ],
+    "minecraft:polished_blackstone_brick_slab": [
+      53,
+      49,
+      57
+    ],
+    "minecraft:polished_blackstone_brick_stairs": [
+      53,
+      49,
+      57
+    ],
+    "minecraft:polished_blackstone_button": [
+      53,
+      49,
+      57
+    ],
+    "minecraft:polished_blackstone_slab": [
+      53,
+      49,
+      57
+    ],
+    "minecraft:polished_blackstone_stairs": [
+      53,
+      49,
+      57
+    ],
+    "minecraft:polished_blackstone_wall": [
+      53,
+      49,
+      57
+    ],
+    "minecraft:purple_banner": [
+      127,
+      63,
+      178
+    ],
+    "minecraft:red_banner": [
+      160,
+      20,
+      20
+    ],
+    "minecraft:stained_glass_pane|black": [
+      60,
+      60,
+      60
+    ],
+    "minecraft:stained_glass_pane|white": [
+      246,
+      246,
+      246
+    ],
+    "minecraft:stained_glass|black": [
+      60,
+      60,
+      60
+    ],
+    "minecraft:stained_glass|white": [
+      246,
+      246,
+      246
+    ],
+    "minecraft:stained_terracotta|white": [
+      240,
+      221,
+      211
+    ],
+    "minecraft:tall_seagrass": [
+      45,
+      117,
+      4
+    ],
+    "minecraft:white_banner": [
+      255,
+      255,
+      255
+    ],
+    "minecraft:white_bed": [
+      245,
+      245,
+      245
+    ],
+    "minecraft:white_carpet": [
+      245,
+      245,
+      245
+    ],
+    "minecraft:wool|black": [
+      24,
+      22,
+      22
+    ],
+    "minecraft:wool|white": [
+      238,
+      238,
+      238
+    ],
+    "minecraft:yellow_banner": [
+      250,
+      238,
+      77
     ]
   },
   "schema_version": 1,
@@ -5598,6 +5888,26 @@
     "minecraft:warped_door_bottom",
     "minecraft:warped_door_top",
     "minecraft:weathered_copper_door_bottom",
-    "minecraft:weathered_copper_door_top"
+    "minecraft:weathered_copper_door_top",
+    "minecraft:acacia_wall_sign",
+    "minecraft:birch_hanging_sign",
+    "minecraft:birch_sign",
+    "minecraft:birch_wall_sign",
+    "minecraft:black_banner",
+    "minecraft:blue_banner",
+    "minecraft:brown_banner",
+    "minecraft:dark_oak_sign",
+    "minecraft:dark_oak_wall_sign",
+    "minecraft:light_blue_banner",
+    "minecraft:magenta_banner",
+    "minecraft:orange_banner",
+    "minecraft:pale_oak_wall_sign",
+    "minecraft:pink_banner",
+    "minecraft:purple_banner",
+    "minecraft:red_banner",
+    "minecraft:stained_glass_pane|black",
+    "minecraft:stained_glass_pane|white",
+    "minecraft:white_banner",
+    "minecraft:yellow_banner"
   ]
 }

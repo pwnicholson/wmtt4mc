@@ -515,6 +515,8 @@ class _PaletteEditorState:
     keys_sorted: List[str] = None            # type: ignore[assignment]
     display_keys: List[str] = None           # type: ignore[assignment]
     display_to_key: Dict[str, str] = None    # type: ignore[assignment]
+    highlight_unknowns: set = None          # type: ignore[assignment]
+    edited_keys: set = None                 # type: ignore[assignment]
     unsaved_changes: bool = False
 
     def __post_init__(self):
@@ -530,6 +532,10 @@ class _PaletteEditorState:
             self.display_keys = []
         if self.display_to_key is None:
             self.display_to_key = {}
+        if self.highlight_unknowns is None:
+            self.highlight_unknowns = set()
+        if self.edited_keys is None:
+            self.edited_keys = set()
 
 
 class _HSVPicker(ttk.Frame):
@@ -707,6 +713,79 @@ class _PaletteCopyDialog(tk.Toplevel):
     def _apply(self) -> None:
         self.result_keys = [k for k in self._all_keys if self._vars[k].get()]
         self.result_copy_transparent = self._copy_transparent_var.get()
+        self.destroy()
+
+    def _cancel(self) -> None:
+        self.destroy()
+
+
+class _PaletteSaveAsDialog(tk.Toplevel):
+    """Modal Save As dialog with embedded export-mode option."""
+
+    def __init__(self, parent: tk.Misc, initial_path: str = ""):
+        super().__init__(parent)
+        self.title("Save palette as")
+        self.transient(parent)
+        self.grab_set()
+        self.resizable(False, False)
+
+        self.result_path = ""
+        self.result_export_changed_only = False
+
+        self._path_var = tk.StringVar(value=initial_path or "")
+        self._export_changed_only_var = tk.BooleanVar(value=True)
+
+        root = ttk.Frame(self, padding=12)
+        root.pack(fill="both", expand=True)
+
+        ttk.Label(root, text="File path:").grid(row=0, column=0, sticky="w")
+        path_row = ttk.Frame(root)
+        path_row.grid(row=1, column=0, sticky="ew", pady=(4, 8))
+        path_row.grid_columnconfigure(0, weight=1)
+
+        ent = ttk.Entry(path_row, textvariable=self._path_var, width=70)
+        ent.grid(row=0, column=0, sticky="ew")
+        ttk.Button(path_row, text="Browse...", command=self._browse).grid(
+            row=0, column=1, padx=(8, 0)
+        )
+
+        ttk.Checkbutton(
+            root,
+            text="Export New/Changed blocks only (exclude untouched unknowns)",
+            variable=self._export_changed_only_var,
+        ).grid(row=2, column=0, sticky="w", pady=(0, 10))
+
+        btns = ttk.Frame(root)
+        btns.grid(row=3, column=0, sticky="e")
+        ttk.Button(btns, text="Cancel", command=self._cancel).pack(side="right")
+        ttk.Button(btns, text="Save", command=self._accept).pack(side="right", padx=(0, 8))
+
+        root.grid_columnconfigure(0, weight=1)
+        ent.focus_set()
+        ent.selection_range(0, "end")
+
+    def _browse(self) -> None:
+        initial = self._path_var.get().strip()
+        initial_dir = os.path.dirname(initial) if initial else ""
+        initial_file = os.path.basename(initial) if initial else "palette.json"
+        chosen = filedialog.asksaveasfilename(
+            title="Save palette as...",
+            defaultextension=".json",
+            filetypes=[("JSON files", "*.json"), ("All files", "*.*")],
+            initialdir=initial_dir or None,
+            initialfile=initial_file,
+            parent=self,
+        )
+        if chosen:
+            self._path_var.set(chosen)
+
+    def _accept(self) -> None:
+        path = self._path_var.get().strip()
+        if not path:
+            messagebox.showwarning("Save palette", "Please choose a file path.", parent=self)
+            return
+        self.result_path = path
+        self.result_export_changed_only = bool(self._export_changed_only_var.get())
         self.destroy()
 
     def _cancel(self) -> None:
@@ -2339,6 +2418,20 @@ _GENERIC_DIRECT_FALLBACKS: Dict[str, Tuple[int, int, int]] = {
 }
 
 
+def _is_type_level_generic_id(block_id: str) -> bool:
+    """Return True for broad generic IDs that should not count as exact palette hits."""
+    bid = str(block_id or "").strip().lower()
+    if not bid.startswith("minecraft:"):
+        return False
+    if bid in {"minecraft:stairs", "minecraft:slab"}:
+        return True
+    if bid in _GENERIC_SUFFIX_FAMILIES:
+        return True
+    if bid in _GENERIC_DIRECT_FALLBACKS:
+        return True
+    return False
+
+
 @lru_cache(maxsize=8192)
 def _generic_palette_family_fallback(block_id: str) -> Optional[Tuple[int, int, int]]:
     """Best-effort color for generic IDs by reusing nearby palette families."""
@@ -2698,6 +2791,38 @@ def block_key(block) -> str:
     return str(block)
 
 
+def _parse_props_from_raw_id(raw_id: str) -> Dict[str, str]:
+    """Parse blockstate-like properties from either [...] or {...} forms.
+
+    Supports key=value and key:value pairs with quoted or unquoted values.
+    """
+    s = str(raw_id or "").strip()
+    inside = ""
+    if "[" in s and "]" in s:
+        inside = s.split("[", 1)[1].rsplit("]", 1)[0]
+    elif "{" in s and "}" in s:
+        inside = s.split("{", 1)[1].rsplit("}", 1)[0]
+    if not inside:
+        return {}
+
+    props: Dict[str, str] = {}
+    for part in inside.split(","):
+        p = part.strip()
+        if not p:
+            continue
+        if "=" in p:
+            k, v = p.split("=", 1)
+        elif ":" in p:
+            k, v = p.split(":", 1)
+        else:
+            continue
+        k = str(k).strip().strip('"\'')
+        v = str(v).strip().strip('"\'')
+        if k:
+            props[k] = v
+    return props
+
+
 def normalize_block_id(block_id: str) -> str:
     bid = str(block_id).strip()
 
@@ -2709,14 +2834,19 @@ def normalize_block_id(block_id: str) -> str:
         base, props = bid.split("[", 1)
         props = props[:-1]
         bid = base.strip()
+    elif "{" in bid and bid.endswith("}"):
+        base, props = bid.split("{", 1)
+        props = props[:-1]
+        bid = base.strip()
 
     if bid.startswith("universal_minecraft:"):
         bid = "minecraft:" + bid.split(":", 1)[1]
 
+    parsed_props = _parse_props_from_raw_id(block_id)
+
     if bid == "minecraft:plant" and props:
-        m = re.search(r'plant_type\\s*=\\s*\\"([^\\"]+)\\"', props)
-        if m:
-            pt = m.group(1).strip().lower()
+        pt = (parsed_props.get("plant_type") or parsed_props.get("type") or "").strip().lower()
+        if pt:
             if pt == "grass":
                 return "minecraft:grass"
             if pt == "fern":
@@ -2725,7 +2855,32 @@ def normalize_block_id(block_id: str) -> str:
                 return "minecraft:tall_grass"
             if pt in ("seagrass", "sea_grass"):
                 return "minecraft:seagrass"
-            return "minecraft:grass"
+            if pt in ("poppy", "dandelion", "allium", "blue_orchid", "azure_bluet", "cornflower", "oxeye_daisy", "lily_of_the_valley"):
+                return f"minecraft:plant|{pt}"
+            return f"minecraft:plant|{pt}"
+
+    if bid == "minecraft:double_plant":
+        pt = (parsed_props.get("plant_type") or parsed_props.get("type") or parsed_props.get("flower_type") or "").strip().lower()
+        if pt:
+            return f"minecraft:double_plant|{pt}"
+
+    if bid == "minecraft:bamboo":
+        leaf = (parsed_props.get("leaves") or parsed_props.get("leaf_size") or parsed_props.get("bamboo_leaf_size") or "").strip().lower()
+        if leaf in ("large", "large_leaves"):
+            return "minecraft:bamboo_large_leaves"
+        if leaf in ("small", "small_leaves"):
+            return "minecraft:bamboo_small_leaves"
+        if leaf in ("none", "no_leaves"):
+            return "minecraft:bamboo_stalk"
+        age = (parsed_props.get("age") or "").strip().lower()
+        if age == "0":
+            return "minecraft:bamboo_stage0"
+        return "minecraft:bamboo_stalk"
+
+    if bid == "minecraft:azalea":
+        flowering = (parsed_props.get("flowering") or parsed_props.get("is_flowering") or parsed_props.get("type") or "").strip().lower()
+        if flowering in ("true", "1", "flowering", "flowering_azalea"):
+            return "minecraft:flowering_azalea"
 
     if bid == "minecraft:snow_layer":
         return "minecraft:snow"
@@ -2752,20 +2907,12 @@ def _canon_block_id_for_palette(raw_id: str) -> str:
 
     # Extract base id and property dict (if any)
     base = s.split("[", 1)[0].split("{", 1)[0]
-    props: Dict[str, str] = {}
-    if "[" in s and "]" in s:
-        inside = s.split("[", 1)[1].split("]", 1)[0]
-        for part in inside.split(","):
-            part = part.strip()
-            if not part or "=" not in part:
-                continue
-            k, v = part.split("=", 1)
-            props[k.strip()] = v.strip().strip('"')
+    props: Dict[str, str] = _parse_props_from_raw_id(s)
 
     base = _ID_ALIASES.get(base, base)
 
     # Wood variants
-    material = props.get("material")
+    material = props.get("material") or props.get("wood_type") or props.get("wood")
     if base == "minecraft:leaves" and material:
         return f"minecraft:{material}_leaves"
     if base == "minecraft:log" and material:
@@ -2779,6 +2926,26 @@ def _canon_block_id_for_palette(raw_id: str) -> str:
         return f"minecraft:{material}_sapling"
     if base == "minecraft:fence" and material:
         return f"minecraft:{material}_fence"
+    if base == "minecraft:stairs" and material:
+        return f"minecraft:{material}_stairs"
+    if base == "minecraft:slab" and material:
+        return f"minecraft:{material}_slab"
+    if base == "minecraft:trapdoor" and material:
+        return f"minecraft:{material}_trapdoor"
+    if base == "minecraft:door" and material:
+        return f"minecraft:{material}_door_bottom"
+    if base == "minecraft:fence_gate" and material:
+        return f"minecraft:{material}_fence_gate"
+    if base == "minecraft:button" and material:
+        return f"minecraft:{material}_button"
+    if base == "minecraft:pressure_plate" and material:
+        return f"minecraft:{material}_pressure_plate"
+    if base == "minecraft:sign" and material:
+        return f"minecraft:{material}_sign"
+    if base == "minecraft:wall_sign" and material:
+        return f"minecraft:{material}_wall_sign"
+    if base == "minecraft:wall_hanging_sign" and material:
+        return f"minecraft:{material}_hanging_sign"
 
     # Color variants
     color = props.get("color")
@@ -2786,6 +2953,10 @@ def _canon_block_id_for_palette(raw_id: str) -> str:
         return f"minecraft:{color}_carpet"
     if base == "minecraft:wool" and color:
         return f"minecraft:{color}_wool"
+    if base == "minecraft:bed" and color:
+        return f"minecraft:{color}_bed"
+    if base in ("minecraft:banner", "minecraft:wall_banner") and color:
+        return f"minecraft:{color}_banner"
 
     # Walls (material-based)
     if base == "minecraft:wall" and material:
@@ -2830,20 +3001,16 @@ def _extract_block_base_and_props(block) -> Tuple[str, Dict[str, str], str]:
                     props[str(k)] = str(val)
             break
 
-    # Parse props from string form if needed
-    if "[" in raw and raw.endswith("]"):
-        try:
-            base_s, prop_s = raw.split("[", 1)
-            prop_s = prop_s[:-1]
-            if base is None:
-                base = base_s.strip()
-            for m in re.finditer(r'([a-zA-Z0-9_:-]+)\s*=\s*\"([^\"]*)\"', prop_s):
-                props.setdefault(m.group(1), m.group(2))
-        except Exception:
-            pass
+    # Parse props from raw string form if needed (supports both [...] and {...}).
+    try:
+        parsed = _parse_props_from_raw_id(raw)
+        for k, v in parsed.items():
+            props.setdefault(k, v)
+    except Exception:
+        pass
 
     if base is None:
-        base = raw.split("[", 1)[0].strip()
+        base = raw.split("[", 1)[0].split("{", 1)[0].strip()
 
     # Convert universal_minecraft:foo -> minecraft:foo
     if base.startswith("universal_minecraft:"):
@@ -2861,11 +3028,13 @@ def classify_block(block, extra_palette: Optional[Dict[str, Tuple[int, int, int]
     """
     base, props, raw = _extract_block_base_and_props(block)
     bid = normalize_block_id(raw)
-    palette_key = _ID_ALIASES.get(_canon_block_id_for_palette(raw), _canon_block_id_for_palette(raw))
+    canon_key = _canon_block_id_for_palette(raw)
+    palette_key = _ID_ALIASES.get(canon_key, canon_key)
+    report_key = palette_key if str(palette_key).startswith("minecraft:") else bid
 
     # Always treat rails as known
     if "rail" in bid:
-        return (160, 160, 160), bid, True, "rail"
+        return (160, 160, 160), report_key, True, "rail"
 
     wood_type = None
     for k in ("wood_type", "wood", "material", "type", "tree_type"):
@@ -2910,53 +3079,57 @@ def classify_block(block, extra_palette: Optional[Dict[str, Tuple[int, int, int]
     # Check extra_palette (palette editor) first, then fall back to built-in PALETTE.
     if extra_palette:
         if palette_key in extra_palette:
-            return extra_palette[palette_key], palette_key, True, "editor_palette"
+            reason = "generic_palette_fallback" if _is_type_level_generic_id(palette_key) else "editor_palette"
+            return extra_palette[palette_key], report_key, True, reason
         if bid in extra_palette:
-            return extra_palette[bid], bid, True, "editor_palette"
+            reason = "generic_palette_fallback" if _is_type_level_generic_id(bid) else "editor_palette"
+            return extra_palette[bid], report_key, True, reason
     if palette_key in PALETTE:
-        return PALETTE[palette_key], palette_key, True, "palette"
+        reason = "generic_palette_fallback" if _is_type_level_generic_id(palette_key) else "palette"
+        return PALETTE[palette_key], report_key, True, reason
     if bid in PALETTE:
-        return PALETTE[bid], bid, True, "palette"
+        reason = "generic_palette_fallback" if _is_type_level_generic_id(bid) else "palette"
+        return PALETTE[bid], report_key, True, reason
 
     # Generic-ID fallback: resolve IDs like "minecraft:fence" or crop roots
     # using nearby palette family entries before dropping to gray unknown.
     generic_rgb = _generic_palette_family_fallback(bid)
     if generic_rgb is not None:
-        return generic_rgb, bid, True, "generic_palette_fallback"
+        return generic_rgb, report_key, True, "generic_palette_fallback"
 
     # Non-gray defaults for big generic buckets
     if bid == "minecraft:leaves":
-        return (72, 144, 48), bid, True, "generic"
+        return (72, 144, 48), report_key, True, "generic"
     if bid == "minecraft:log":
-        return (102, 81, 51), bid, True, "generic"
+        return (102, 81, 51), report_key, True, "generic"
     if bid == "minecraft:planks":
-        return (150, 120, 80), bid, True, "generic"
+        return (150, 120, 80), report_key, True, "generic"
     if bid in ("minecraft:plant", "minecraft:double_plant", "minecraft:leaf_litter", "minecraft:pink_petals", "minecraft:wildflowers"):
-        return (96, 170, 72), bid, True, "generic"
+        return (96, 170, 72), report_key, True, "generic"
 
     # Heuristics
     if bid.endswith("_leaves"):
-        return (72, 144, 48), bid, True, "heuristic"
+        return (72, 144, 48), report_key, True, "heuristic"
     if bid.endswith("_log") or bid.endswith("_wood") or bid.endswith("_stem") or bid.endswith("_hyphae"):
-        return (102, 81, 51), bid, True, "heuristic"
+        return (102, 81, 51), report_key, True, "heuristic"
     if bid.endswith("_planks"):
-        return (150, 120, 80), bid, True, "heuristic"
+        return (150, 120, 80), report_key, True, "heuristic"
     if bid.endswith("_slab") or bid.endswith("_stairs"):
-        return (135, 115, 85), bid, True, "heuristic"
+        return (135, 115, 85), report_key, True, "heuristic"
     if "water" in bid or "seagrass" in bid or "kelp" in bid or "bubble_column" in bid:
-        return (64, 64, 255), bid, True, "heuristic"
+        return (64, 64, 255), report_key, True, "heuristic"
     if "lava" in bid:
-        return (255, 80, 0), bid, True, "heuristic"
+        return (255, 80, 0), report_key, True, "heuristic"
     if "stone" in bid or "deepslate" in bid or "tuff" in bid:
-        return (120, 120, 120), bid, True, "heuristic"
+        return (120, 120, 120), report_key, True, "heuristic"
     if "sand" in bid:
-        return (220, 210, 150), bid, True, "heuristic"
+        return (220, 210, 150), report_key, True, "heuristic"
     if "dirt" in bid or "mud" in bid or "podzol" in bid:
-        return (134, 96, 67), bid, True, "heuristic"
+        return (134, 96, 67), report_key, True, "heuristic"
     if "gravel" in bid:
-        return (150, 150, 150), bid, True, "heuristic"
+        return (150, 150, 150), report_key, True, "heuristic"
 
-    return (180, 180, 180), bid, False, "unknown"
+    return (180, 180, 180), report_key, False, "unknown"
 
 
 
@@ -3542,6 +3715,14 @@ def _write_frame_unknowns_json(json_path: str, unknown_norm_counts: Counter) -> 
             json.dump(payload, f, indent=2)
     except Exception:
         pass  # Non-fatal: debug aid only
+
+
+def _reason_needs_real_palette_entry(reason: Any, is_known: bool) -> bool:
+    """Return True unless a block came from an exact palette/editor palette entry."""
+    if not is_known:
+        return True
+    r = str(reason or "").strip().lower()
+    return r not in {"palette", "editor_palette"}
 
 
 def compute_blocks_per_pixel(width_blocks: int, height_blocks: int, target: Optional[Tuple[int, int]]) -> int:
@@ -4384,8 +4565,8 @@ def render_cached_world_map(
                     block_id = int(id_arr[lz, lx])
                     raw = block_lookup[block_id] if 0 <= block_id < len(block_lookup) else "minecraft:air"
                     _ep = opt.editor_palette if opt.use_editor_palette else None
-                    rgb_px, norm_id, is_known, _reason = classify_block(raw, _ep)
-                    if not is_known:
+                    rgb_px, norm_id, is_known, reason = classify_block(raw, _ep)
+                    if _reason_needs_real_palette_entry(reason, is_known):
                         unknown_norm_counts[norm_id] += 1
                     rgb[iz, ix, :] = rgb_px
                     hmap[iz, ix] = int(y_arr[lz, lx])
@@ -4920,7 +5101,7 @@ def render_one_chunk_png(
 
                 if found:
                     _ep = opt.editor_palette if opt.use_editor_palette else None
-                    rgb_px, norm_id, is_known, _ = classify_block(raw_id, _ep)
+                    rgb_px, norm_id, is_known, reason = classify_block(raw_id, _ep)
                     colored_cols += 1
                     rgb[lz, lx, :] = rgb_px
                     hmap[lz, lx] = top_y
@@ -4930,7 +5111,7 @@ def render_one_chunk_png(
                             samples_set.add(str(raw_id))
                             samples_raw.append(str(raw_id))
 
-                    if not is_known:
+                    if _reason_needs_real_palette_entry(reason, is_known):
                         unknown_cols += 1
                         unknown_norm_counts[norm_id] += 1
 
@@ -8297,6 +8478,8 @@ class App(tk.Tk):
         for k in keys:
             grp = _pal_derive_group(k) if self._pal_sort_var.get() == "Grouped" else ""
             label = f"{grp} / {k}" if grp else k
+            if k in self._pal.highlight_unknowns:
+                label = f"* {label}"
             if k in self._pal.transparent:
                 label += "  [transparent]"
             display_keys.append(label)
@@ -8308,6 +8491,14 @@ class App(tk.Tk):
         self._pal_listbox.delete(0, tk.END)
         for d in display_keys:
             self._pal_listbox.insert(tk.END, d)
+        for idx, d in enumerate(display_keys):
+            k = display_to_key.get(d)
+            if k in self._pal.highlight_unknowns:
+                try:
+                    self._pal_listbox.itemconfig(idx, foreground="#c00000")
+                except Exception:
+                    # Some Tk variants do not support per-item listbox styling.
+                    pass
 
     def _pal_selected_key(self) -> Optional[str]:
         sel = self._pal_listbox.curselection()
@@ -8396,7 +8587,16 @@ class App(tk.Tk):
         if not k or self._pal_new_rgb is None:
             return
         self._pal.palette[k] = self._pal_new_rgb
+        self._pal.edited_keys.add(k)
         self._pal.unsaved_changes = True
+        if k in self._pal.highlight_unknowns:
+            self._pal.highlight_unknowns.discard(k)
+            self._pal_refresh_list()
+            for idx, label in enumerate(self._pal.display_keys):
+                if self._pal.display_to_key.get(label) == k:
+                    self._pal_listbox.selection_set(idx)
+                    self._pal_listbox.see(idx)
+                    break
         self._pal_set_current(self._pal_new_rgb)
         self._pal_set_status(f"Updated {k} → {_pal_rgb_to_hex(self._pal_new_rgb)} — not saved.",
                               unsaved=True)
@@ -8414,6 +8614,11 @@ class App(tk.Tk):
             return
         for t in targets:
             self._pal.palette[t] = self._pal_new_rgb
+        self._pal.edited_keys.update(targets)
+        cleared_unknowns = [t for t in targets if t in self._pal.highlight_unknowns]
+        if cleared_unknowns:
+            self._pal.highlight_unknowns.difference_update(cleared_unknowns)
+            self._pal_refresh_list()
         if dlg.result_copy_transparent:
             if self._pal_transparent_var.get():
                 self._pal.transparent.update(targets)
@@ -8633,9 +8838,10 @@ class App(tk.Tk):
         self.after(150, _poll)
 
     def _pal_load_unknowns(self) -> None:
-        """Load an unknown_blocks.json written after a render run and add any missing blocks
-        to the current palette with the gray placeholder color, then filter the list to show
-        only those blocks so the user can quickly assign colors to them.
+        """Load unknown_blocks.json and merge IDs into the currently loaded palette.
+
+        Missing IDs are added with placeholder gray. All IDs loaded from the file are
+        highlighted in the editor list with a red "*" marker for quick review.
         """
         path = filedialog.askopenfilename(
             title="Open unknown_blocks.json from a render run",
@@ -8666,14 +8872,17 @@ class App(tk.Tk):
             self._pal.raw_obj = {"schema_version": 1, "rgb_overrides": {}, "transparent_blocks": []}
             self._pal.transparent = set()
             self._pal.keys_sorted = []
+            self._pal.highlight_unknowns = set()
             self._pal.unsaved_changes = False
 
         # Add unknown blocks that are not already present with the gray placeholder (180,180,180)
         added: list = []
+        loaded_unknown_ids: set = set()
         for block_id in data:
             bid = str(block_id).strip()
             if not bid:
                 continue
+            loaded_unknown_ids.add(bid)
             if bid not in self._pal.palette:
                 self._pal.palette[bid] = (180, 180, 180)
                 added.append(bid)
@@ -8682,31 +8891,20 @@ class App(tk.Tk):
             self._pal.keys_sorted = sorted(self._pal.palette.keys())
             self._pal.unsaved_changes = True
 
-        # Preload the search filter with the unknown block IDs so they're immediately visible
-        unknown_ids = sorted(str(b) for b in data if str(b).strip())
-        # Use a common prefix substring if possible, otherwise leave blank so the user sees
-        # all entries; we'll filter the listbox to show only the loaded unknowns.
-        self._pal_search_var.set("")
+        # Highlight all IDs that were loaded from this unknown file.
+        self._pal.highlight_unknowns = loaded_unknown_ids
+
+        # Keep the current search/sort behavior; just refresh and mark.
         self._pal_refresh_list()
 
-        # Re-filter to show only the unknowns just loaded (display_keys holds label strings;
-        # use display_to_key to map back to the raw block ID for the membership check)
-        unknown_set = set(unknown_ids)
-        self._pal.display_keys = [
-            d for d in self._pal.display_keys
-            if self._pal.display_to_key.get(d) in unknown_set
-        ]
-        self._pal_listbox.delete(0, "end")
-        for d in self._pal.display_keys:
-            self._pal_listbox.insert("end", d)
-
-        n_unknown = len(unknown_ids)
+        n_unknown = len(loaded_unknown_ids)
         n_added = len(added)
         msg = (
             f"Loaded {n_unknown} unknown block(s) from run ({n_added} new)."
             if n_added else
             f"{n_unknown} unknown block(s) loaded — all already in palette."
         )
+        msg += " Marked with red * in the list."
         if n_added:
             msg += " Assign colors and Save."
         self._pal_set_status(msg, unsaved=bool(added))
@@ -8733,6 +8931,8 @@ class App(tk.Tk):
             self._pal.raw_obj = raw_obj
             self._pal.transparent = transparent
             self._pal.keys_sorted = sorted(palette.keys())
+            self._pal.highlight_unknowns = set()
+            self._pal.edited_keys = set()
             self._pal.unsaved_changes = False
             self._pal_path_lbl.configure(text=os.path.abspath(path))
             self._pal_refresh_list()
@@ -8755,28 +8955,66 @@ class App(tk.Tk):
         self._pal_write(self._pal.path)
 
     def _pal_save_as(self) -> None:
-        path = filedialog.asksaveasfilename(
-            title="Save palette as…",
-            defaultextension=".json",
-            filetypes=[("JSON files", "*.json"), ("All files", "*.*")],
-            parent=self,
-        )
-        if path:
-            self._pal_write(path)
-            self._pal.path = path
-            self._pal_path_lbl.configure(text=os.path.abspath(path))
+        initial_dir = os.path.dirname(self._pal.path) if self._pal.path else os.getcwd()
+        initial_file = os.path.basename(self._pal.path) if self._pal.path else "palette.json"
+        initial_path = os.path.join(initial_dir, initial_file)
 
-    def _pal_write(self, path: str) -> None:
+        dlg = _PaletteSaveAsDialog(self, initial_path=initial_path)
+        self.wait_window(dlg)
+        if not dlg.result_path:
+            return
+
+        self._pal_write(dlg.result_path, export_changed_only=dlg.result_export_changed_only)
+        self._pal.path = dlg.result_path
+        self._pal_path_lbl.configure(text=os.path.abspath(dlg.result_path))
+
+    def _pal_export_changed_only_palette(self) -> Dict[str, _PalRGB]:
+        """Build subset of edited entries that differ from the app default palette."""
+        default_path = os.path.join(_app_dir(), "palette.json")
+        default_palette: Dict[str, _PalRGB] = {}
         try:
-            _pal_write_file(path, self._pal.raw_obj, self._pal.palette, self._pal.transparent)
+            if os.path.isfile(default_path):
+                _raw, loaded, _transparent = _pal_load_file(default_path)
+                if isinstance(loaded, dict):
+                    default_palette = loaded
+        except Exception:
+            default_palette = {}
+
+        out: Dict[str, _PalRGB] = {}
+        for k in sorted(self._pal.edited_keys):
+            if k not in self._pal.palette:
+                continue
+            cur = self._pal.palette[k]
+            base = default_palette.get(k)
+            if base is None or tuple(base) != tuple(cur):
+                out[k] = cur
+        return out
+
+    def _pal_write(self, path: str, export_changed_only: bool = False) -> None:
+        try:
+            export_palette = self._pal.palette
+            export_transparent = self._pal.transparent
+            raw_obj = self._pal.raw_obj
+
+            if export_changed_only:
+                export_palette = self._pal_export_changed_only_palette()
+                export_transparent = {k for k in self._pal.transparent if k in export_palette}
+                raw_obj = {"schema_version": 1, "rgb_overrides": {}, "transparent_blocks": []}
+
+            _pal_write_file(path, raw_obj, export_palette, export_transparent)
             self._pal.unsaved_changes = False
-            self._pal_set_status(
-                f"Saved {len(self._pal.palette):,} entries to {os.path.basename(path)}"
-            )
+            if export_changed_only:
+                self._pal_set_status(
+                    f"Saved {len(export_palette):,} edited/diff entries to {os.path.basename(path)}"
+                )
+            else:
+                self._pal_set_status(
+                    f"Saved {len(self._pal.palette):,} entries to {os.path.basename(path)}"
+                )
             # If we just saved the app's palette.json, reload it into memory
             app_palette = os.path.normcase(os.path.abspath(
                 os.path.join(_app_dir(), "palette.json")))
-            if os.path.normcase(os.path.abspath(path)) == app_palette:
+            if (not export_changed_only) and os.path.normcase(os.path.abspath(path)) == app_palette:
                 try:
                     apply_palette_overrides(path)
                     self._pal_set_status(
@@ -8987,7 +9225,7 @@ class App(tk.Tk):
         li("Add to current:  identical entries are silently skipped; same block with\n"
            "      a different colour opens the conflict resolution dialog.")
         li("Load unknowns from run\u2026  \u2014  reads an  unknown_blocks.json  from a run\n"
-           "      folder and adds every unknown block as grey so you can assign colours.")
+           "      folder, adds missing IDs as grey, and marks loaded IDs with a red *.")
         i("end", "\n")
 
         i("end", "Transparent blocks\n", "h2")

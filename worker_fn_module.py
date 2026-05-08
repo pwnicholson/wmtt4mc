@@ -92,17 +92,19 @@ def worker_fn(
                 if found:
                     raw_str = str(raw_block)
                     try:
-                        rgb_px, norm_id, is_known, _reason = classify_block_fn(raw_block)
+                        rgb_px, norm_id, is_known, reason = classify_block_fn(raw_block)
                     except Exception:
                         idx = PALETTE_KEY_TO_IDX.get(raw_str)
                         if idx is not None:
                             rgb_px = PALETTE_COLOR_TABLE[idx]
                             norm_id = raw_str
                             is_known = True
+                            reason = "palette"
                         else:
                             rgb_px = (128, 128, 128)
                             norm_id = raw_str
                             is_known = False
+                            reason = "unknown"
                     local_colored += 1
                     rgb[iz, ix, :] = rgb_px
                     hmap[iz, ix] = top_y
@@ -111,15 +113,19 @@ def worker_fn(
                             if raw_str not in samples_set and len(samples_set) < max_samples:
                                 samples_set.add(raw_str)
                                 samples_raw.append(raw_str)
-                    if (not is_known) and opt.debug_block_samples:
+                    # Count as unknown unless this came from an exact palette/editor hit.
+                    reason_l = str(reason or "").strip().lower()
+                    needs_real_palette_entry = (not is_known) or (reason_l not in ("palette", "editor_palette"))
+                    if needs_real_palette_entry:
                         local_unknown += 1
                         local_unknown_counts[norm_id] += 1
-                        base_id = str(norm_id).split('[', 1)[0].split('{', 1)[0]
-                        if base_id in PALETTE_KEY_TO_IDX:
-                            local_exact_key_miss_counts[base_id] += 1
-                        else:
-                            local_base_id_miss_counts[base_id] += 1
-                        local_unknown_raw_counts[raw_str] += 1
+                        if not is_known:
+                            base_id = str(norm_id).split('[', 1)[0].split('{', 1)[0]
+                            if base_id in PALETTE_KEY_TO_IDX:
+                                local_exact_key_miss_counts[base_id] += 1
+                            else:
+                                local_base_id_miss_counts[base_id] += 1
+                            local_unknown_raw_counts[raw_str] += 1
                 else:
                     local_air += 1
                     rgb[iz, ix, :] = (0, 0, 0)
