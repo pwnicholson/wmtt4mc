@@ -191,13 +191,13 @@ class TestDiscoveryRawSources:
 class TestCacheMatching:
     """Test cache and backup matching logic."""
     
-    def _create_test_cache(self, cache_path, source_name="test.zip", source_size=12345):
+    def _create_test_cache(self, cache_path, source_name="test.zip", source_size=12345, source_mtime_ns=None):
         """Helper to create a minimal test cache file."""
         metadata = {
             "source_kind": "file",
             "source_name": source_name,
             "source_size": source_size,
-            "source_mtime_ns": 1000000000,
+            "source_mtime_ns": int(source_mtime_ns) if source_mtime_ns is not None else 1000000000,
             "source_hash": "abc123",
             "format_version": 1,
         }
@@ -227,9 +227,10 @@ class TestCacheMatching:
         """Cache matches source with same size and mtime."""
         zip_file = tmp_path / "World.zip"
         zip_file.write_text("x" * 1000)
+        mtime_ns = zip_file.stat().st_mtime_ns
         
         cache_file = tmp_path / "World.wmtt4mc"
-        self._create_test_cache(str(cache_file), "World.zip", 1000)
+        self._create_test_cache(str(cache_file), "World.zip", 1000, mtime_ns)
         
         header = read_cache_header(str(cache_file))
         assert cache_matches_source(header, str(zip_file))
@@ -238,10 +239,11 @@ class TestCacheMatching:
         """Cache doesn't match if file size differs."""
         zip_file = tmp_path / "World.zip"
         zip_file.write_text("x" * 1000)
+        mtime_ns = zip_file.stat().st_mtime_ns
         
         cache_file = tmp_path / "World.wmtt4mc"
         # Create cache with different size
-        self._create_test_cache(str(cache_file), "World.zip", 2000)
+        self._create_test_cache(str(cache_file), "World.zip", 2000, mtime_ns)
         
         header = read_cache_header(str(cache_file))
         assert not cache_matches_source(header, str(zip_file))
@@ -250,9 +252,10 @@ class TestCacheMatching:
         """Cache with different source name doesn't match."""
         zip_file = tmp_path / "World1.zip"
         zip_file.write_text("x" * 1000)
+        mtime_ns = zip_file.stat().st_mtime_ns
         
         cache_file = tmp_path / "World2.wmtt4mc"
-        self._create_test_cache(str(cache_file), "World2.zip", 1000)
+        self._create_test_cache(str(cache_file), "World2.zip", 1000, mtime_ns)
         
         header = read_cache_header(str(cache_file))
         assert not cache_matches_source(header, str(zip_file))

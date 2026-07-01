@@ -36,6 +36,7 @@ def worker_fn(
     local_exact_key_miss_counts = Counter()
     local_base_id_miss_counts = Counter()
     local_unknown_raw_counts = Counter()
+    strict_bad_chunk = bool(getattr(opt, "stop_on_bad_chunk_data", False))
 
     for (cx, cz) in coords:
         if cancel_event is not None and cancel_event.is_set():
@@ -46,7 +47,11 @@ def worker_fn(
             else:
                 with chunk_access_lock:
                     ch = get_chunk_cached(cx, cz)
-        except Exception:
+        except Exception as exc:
+            if strict_bad_chunk:
+                raise RuntimeError(
+                    f"Bad chunk data while loading chunk ({cx},{cz}): {type(exc).__name__}: {exc}"
+                ) from exc
             local_skipped += 1
             with counters_lock:
                 shared_counters["processed_chunks"] = shared_counters.get("processed_chunks", 0) + 1

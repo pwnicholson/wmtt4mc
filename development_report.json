@@ -1,7 +1,7 @@
 {
   "environment": {
-    "python_version": "3.11.9",
-    "python_path": "C:\\Users\\webst\\AppData\\Local\\Programs\\Python\\Python311\\python.exe",
+    "python_version": "3.14.5",
+    "python_path": "C:\\Users\\webst\\AppData\\Local\\Python\\pythoncore-3.14-64\\python.exe",
     "platform": "Windows",
     "architecture": "AMD64",
     "python_ok": true,
@@ -12,17 +12,17 @@
     "files": {
       "wmtt4mc.py": {
         "exists": true,
-        "size": 113553,
+        "size": 512569,
         "description": "Main application"
       },
       "palette.json": {
         "exists": true,
-        "size": 84523,
+        "size": 183230,
         "description": "Block color palette"
       },
       "requirements.txt": {
         "exists": true,
-        "size": 49,
+        "size": 52,
         "description": "Python dependencies"
       }
     },
@@ -32,9 +32,10 @@
   "dependencies": {
     "dependencies": {
       "required": {
-        "numpy==1.26.4": null,
-        "pillow==12.1.0": null,
-        "amulet-core==1.9.34": null
+        "numpy": "2.0",
+        "pillow": "12.0",
+        "psutil": "6.0",
+        "zstandard": "0.20"
       },
       "numpy": {
         "status": "ok",
@@ -47,10 +48,6 @@
       "tkinter": {
         "status": "ok",
         "display": "tkinter"
-      },
-      "amulet": {
-        "status": "ok",
-        "display": "amulet-core"
       },
       "threading": {
         "status": "ok",
@@ -78,27 +75,27 @@
   },
   "palette": {
     "analysis": {
-      "file_size": 84523,
-      "total_entries": 1111,
-      "wood_variants": 77,
-      "stone_variants": 60,
-      "water_variants": 3,
+      "file_size": 183230,
+      "total_entries": 2242,
+      "wood_variants": 204,
+      "stone_variants": 140,
+      "water_variants": 9,
       "sample_woods": [
+        "minecraft:acacia_button",
+        "minecraft:acacia_door",
         "minecraft:acacia_door_bottom",
         "minecraft:acacia_door_top",
-        "minecraft:acacia_leaves",
-        "minecraft:acacia_log",
-        "minecraft:acacia_log_top"
+        "minecraft:acacia_double_slab"
       ],
       "sample_stones": [
         "minecraft:blackstone",
-        "minecraft:blackstone_top",
-        "minecraft:chiseled_polished_blackstone"
+        "minecraft:blackstone_double_slab",
+        "minecraft:blackstone_slab"
       ],
       "sample_waters": [
-        "minecraft:water_flow",
-        "minecraft:water_overlay",
-        "minecraft:water_still"
+        "minecraft:flowing_water",
+        "minecraft:underwater_tnt",
+        "minecraft:underwater_torch"
       ]
     },
     "issues": [],
@@ -106,8 +103,8 @@
   },
   "import_test": {
     "status": "success",
-    "version": "1.6.0",
-    "build": "2026.01.20.2",
+    "version": "1.7.1",
+    "build": "2026.06.16.02",
     "issues": [],
     "recommendations": []
   }

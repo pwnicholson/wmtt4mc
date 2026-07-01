@@ -30,7 +30,7 @@ WMTT4MC uses **dual licensing**:
   See: [COMMERCIAL_LICENSE.md](COMMERCIAL_LICENSE.md)
 
 ### Influencers / monetized content
-You are allowed to use WMTT4MC in videos/streams and other content, even if that content is monetized, **as long as you do not sell access to the tool** or charge others to use it.
+You are allowed to use WMTT4MC in videos/streams and other content, even if that content is monetized, **as long as you do not sell access to the tool** or charge others to use it. Mentioning the tool and referring others to it is appreciated.
 
 ## Forks & Naming
 
@@ -44,14 +44,3 @@ Forks are allowed under the Non-Commercial Public License, but:
 - For questions and bug reports, open an Issue on GitHub.
 - For commercial licensing inquiries, see [COMMERCIAL_LICENSE.md](COMMERCIAL_LICENSE.md).
 
-## Self-test: Check for Syntax/Import Errors
-
-Before running the app, you can check for basic Python errors with:
-
-    python test_syntax.py
-
-This script will:
-- Check for syntax errors in wmtt4mc.py
-- Try to import wmtt4mc.py (catches missing dependencies, major import bugs)
-
-If both checks pass, you should be able to run the app normally. If there are errors, the script will print details to help you fix them.

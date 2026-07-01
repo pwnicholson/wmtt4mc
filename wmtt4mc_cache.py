@@ -572,7 +572,7 @@ def discover_raw_snapshot_sources(folder: str) -> List[SnapshotInput]:
 
     for name in names:
         path = os.path.join(folder, name)
-        if os.path.isfile(path) and name.lower().endswith(".zip"):
+        if os.path.isfile(path) and name.lower().endswith((".zip", ".mcworld")):
             out.append(SnapshotInput(kind="zip", path=path, display_name=name, sort_name=name))
         elif is_world_folder(path):
             out.append(SnapshotInput(kind="folder", path=path, display_name=name, sort_name=name))

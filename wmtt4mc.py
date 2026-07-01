@@ -21,7 +21,7 @@ from pathlib import Path
 
 # === Third-party imports ===
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageDraw, ImageFont
 from dataclasses import dataclass, fields
 from typing import Optional, Tuple, Dict, List, Any, Callable, Union
 try:
@@ -2593,10 +2593,12 @@ class RenderOptions:
 
     debug_block_samples: bool = False
     debug_log_unknowns: bool = True
+    stop_on_bad_chunk_data: bool = False
 
     # Output options
     output_name: str = ""
     keep_frames: bool = False
+    frame_label_mode: str = "No label"
 
     # Optional render limiting (world block coordinates, inclusive)
     limit_enabled: bool = False
@@ -3266,26 +3268,35 @@ def resolve_dimension_id(world: Any, requested: str) -> str:
 
 
 def _score_world_root(root: str, dirs: List[str], files: List[str] = None) -> float:
-    dset = set(dirs)
+    dset = {str(d).lower() for d in dirs}
+    fset = {str(f).lower() for f in (files or [])}
     score = 0.0
     if "region" in dset:
         score += 5.0
-    if "DIM-1" in dset or "DIM1" in dset:
+    if "dim-1" in dset or "dim1" in dset:
         score += 3.0
     if "db" in dset:
         score += 5.0
+    # Strongly prefer explicit world metadata when present.
+    if "level.dat" in fset:
+        score += 8.0
+    if "levelname.txt" in fset:
+        score += 2.0
     return score
 
 
 def _score_world_root_path(root: str) -> float:
     """Score a world root path by inspecting its immediate entries."""
     try:
-        entries = []
+        dirs = []
+        files = []
         for e in os.listdir(root):
             p = os.path.join(root, e)
             if os.path.isdir(p):
-                entries.append(e)
-        return _score_world_root(root, entries)
+                dirs.append(e)
+            else:
+                files.append(e)
+        return _score_world_root(root, dirs, files)
     except Exception:
         return 0.0
 
@@ -3299,11 +3310,33 @@ def unzip_world_find_roots(zip_path: str, out_dir: str) -> Tuple[str, List[str]]
 
     candidates: List[Tuple[float, str]] = []
     for root, dirs, files in os.walk(extract_root):
-        if "level.dat" in files:
-            score = _score_world_root(root, dirs)
+        lfiles = {str(f).lower() for f in files}
+        ldirs = {str(d).lower() for d in dirs}
+        is_java_like = "level.dat" in lfiles
+        # Bedrock worlds normally include level.dat + db/, but some exports can
+        # be irregular; allow db/ roots as fallback candidates.
+        is_bedrock_like = "db" in ldirs
+
+        # Amulet's Bedrock loader requires levelname.txt to identify the format.
+        # Some .mcworld exports omit it, so synthesize it in the temp extraction.
+        if is_bedrock_like and is_java_like and "levelname.txt" not in lfiles:
+            try:
+                with open(os.path.join(root, "levelname.txt"), "w", encoding="utf-8", newline="\n") as f:
+                    f.write(os.path.basename(root) or "Imported Bedrock World")
+                lfiles.add("levelname.txt")
+            except Exception:
+                pass
+
+        if is_java_like or is_bedrock_like:
+            score = _score_world_root(root, dirs, files)
             depth = root.count(os.sep) - extract_root.count(os.sep)
             score -= min(depth, 20) * 0.1
             candidates.append((score, root))
+
+    # Last-resort: if nothing matched, include extraction root so caller can
+    # attempt load and emit a concrete error from Amulet.
+    if not candidates:
+        candidates.append((_score_world_root_path(extract_root), extract_root))
 
     candidates.sort(reverse=True, key=lambda x: x[0])
     return extract_root, [c[1] for c in candidates]
@@ -3537,17 +3570,35 @@ def snapshot_loaded_chunk_coords(
     try:
         _tmp_root, candidates = _resolve_snapshot_world_roots(source_path, tmpdir)
         if not candidates:
-            raise RuntimeError("Could not find a world folder (no level.dat found).")
+            raise RuntimeError("Could not find a world folder in archive/folder input.")
 
-        world_root = sorted(
+        ranked = sorted(
             [(r, _score_world_root_path(r)) for r in candidates],
             key=lambda t: t[1], reverse=True,
-        )[0][0]
+        )
 
-        world0 = amulet.load_level(world_root)
-        dim_id = resolve_dimension_id(world0, dimension)
-        coords = world_all_chunk_coords(world0, dim_id)
-        return [(int(cx), int(cz)) for cx, cz in coords]
+        last_exc: Optional[Exception] = None
+        for world_root, _score in ranked:
+            try:
+                world0 = amulet.load_level(world_root)
+                dim_id = resolve_dimension_id(world0, dimension)
+                coords = world_all_chunk_coords(world0, dim_id)
+                return [(int(cx), int(cz)) for cx, cz in coords]
+            except Exception as exc:
+                last_exc = exc
+                try:
+                    if world0 is not None:
+                        world0.close()
+                except Exception:
+                    pass
+                world0 = None
+                continue
+
+        cand_preview = ", ".join(os.path.basename(r) or r for r, _ in ranked[:6])
+        raise RuntimeError(
+            f"Could not load any extracted world root for auto-crop. "
+            f"Candidates: {cand_preview}. Last error: {last_exc}"
+        )
     finally:
         try:
             if world0 is not None:
@@ -3736,6 +3787,49 @@ def compute_blocks_per_pixel(width_blocks: int, height_blocks: int, target: Opti
     return max(1, bpp_w, bpp_h)
 
 
+# Keep pre-allocation checks conservative so we fail with a clear message
+# instead of an opaque NumPy MemoryError.
+_RENDER_GIF_MAX_DIM = 65535
+_MAX_RGB_BUFFER_GIB = 8.0
+
+
+def _validate_render_canvas_size(
+    *,
+    w_px: int,
+    h_px: int,
+    min_x: int,
+    max_x: int,
+    min_z: int,
+    max_z: int,
+    bpp: int,
+    source_label: str,
+) -> None:
+    px_count = max(0, int(w_px)) * max(0, int(h_px))
+    rgb_gib = (float(px_count) * 3.0) / float(1024 ** 3)
+
+    problems: List[str] = []
+    if int(w_px) > _RENDER_GIF_MAX_DIM or int(h_px) > _RENDER_GIF_MAX_DIM:
+        problems.append(
+            f"frame size {w_px}x{h_px}px exceeds GIF per-dimension limit "
+            f"({_RENDER_GIF_MAX_DIM}px)"
+        )
+    if rgb_gib > _MAX_RGB_BUFFER_GIB:
+        problems.append(
+            f"estimated RGB buffer is {rgb_gib:.2f} GiB (limit {_MAX_RGB_BUFFER_GIB:.1f} GiB)"
+        )
+
+    if problems:
+        raise RuntimeError(
+            "[EXTENT] Render extent too large for a single frame: "
+            + "; ".join(problems)
+            + ". "
+            + f"Source={source_label}, bounds X=[{min_x},{max_x}] Z=[{min_z},{max_z}], "
+            + f"blocks/pixel={bpp}. "
+            + "Large far-lands or sparse distant chunks can cause this. "
+            + "Use 'Limit render area' (X/Z), enable auto-crop, or render in multiple regions."
+        )
+
+
 def fit_to_target(img: Image.Image, target: Optional[Tuple[int, int]]) -> Image.Image:
     if target is None:
         return img
@@ -3850,6 +3944,51 @@ def snapshot_input_from_path(path: str) -> SnapshotInput:
     return SnapshotInput(kind="zip", path=path, display_name=display_name, sort_name=display_name)
 
 
+def collect_cache_chunk_occupancy(folder: str, dimension: str) -> Tuple[set, List[str]]:
+    """Collect chunk occupancy from cache files discoverable for the given folder/dimension."""
+    snapshots = find_snapshot_sources(folder, dimension=dimension)
+    cache_paths: List[str] = []
+    seen: set = set()
+    for snap in snapshots:
+        candidate = None
+        if is_cache_file(snap.path):
+            candidate = snap.path
+        elif snap.cache_path and is_cache_file(snap.cache_path):
+            candidate = snap.cache_path
+        if candidate:
+            norm = os.path.normcase(os.path.abspath(candidate))
+            if norm not in seen:
+                seen.add(norm)
+                cache_paths.append(candidate)
+
+    if not cache_paths:
+        raise RuntimeError("No usable cache files were found for this dimension. Build caches first.")
+
+    coords: set = set()
+    bad_caches: List[str] = []
+    for cache_path in cache_paths:
+        try:
+            for cx, cz, _surface_payload, _deep_payload in iter_chunk_rows(cache_path):
+                coords.add((int(cx), int(cz)))
+        except Exception:
+            bad_caches.append(os.path.basename(cache_path))
+
+    if not coords:
+        if bad_caches:
+            raise RuntimeError(
+                "Could not read chunk occupancy from caches: " + ", ".join(sorted(set(bad_caches)))
+            )
+        raise RuntimeError("Caches were found, but no chunk coordinates were readable.")
+
+    return coords, cache_paths
+
+
+def is_world_archive_file(path: str) -> bool:
+    """Return True for supported world archive extensions."""
+    lower = str(path or "").lower()
+    return lower.endswith(".zip") or lower.endswith(".mcworld")
+
+
 _REGION_PATH_RE = re.compile(r"(?:^|/)region/r\.(-?\d+)\.(-?\d+)\.mca$", re.IGNORECASE)
 
 
@@ -3950,7 +4089,7 @@ def estimate_snapshot_block_area_with_source(snapshot: SnapshotInput, dimension:
 
     src = snapshot.raw_path or snapshot.path
     try:
-        if os.path.isfile(src) and src.lower().endswith(".zip") and zipfile.is_zipfile(src):
+        if os.path.isfile(src) and is_world_archive_file(src) and zipfile.is_zipfile(src):
             with zipfile.ZipFile(src, "r") as zf:
                 names = zf.namelist()
                 area = _estimate_block_area_from_region_paths(names, dimension)
@@ -4000,7 +4139,7 @@ def estimate_snapshot_block_area(snapshot: SnapshotInput, dimension: str) -> Opt
 def _resolve_snapshot_world_roots(source_path: str, out_dir: str) -> Tuple[Optional[str], List[str]]:
     if is_world_folder(source_path):
         return None, [source_path]
-    if os.path.isfile(source_path) and source_path.lower().endswith(".zip"):
+    if os.path.isfile(source_path) and is_world_archive_file(source_path):
         extract_root, candidates = unzip_world_find_roots(source_path, out_dir)
         return extract_root, candidates
     raise RuntimeError(f"Unsupported snapshot source: {source_path}")
@@ -4146,6 +4285,7 @@ _cache_worker_get_chunk = None
 _cache_worker_y_min: int = 0
 _cache_worker_y_max: int = 320
 _cache_worker_include_segments: bool = False
+_cache_worker_stop_on_bad_chunk_data: bool = False
 
 
 def _cache_worker_init(
@@ -4154,6 +4294,7 @@ def _cache_worker_init(
     y_min: int,
     y_max: int,
     include_segments: bool,
+    stop_on_bad_chunk_data: bool,
     probe_coord: Tuple[int, int],
 ) -> None:
     """Pool initializer: open the amulet world once per worker process and keep it alive."""
@@ -4164,9 +4305,11 @@ def _cache_worker_init(
 
     global _cache_worker_world, _cache_worker_get_chunk
     global _cache_worker_y_min, _cache_worker_y_max, _cache_worker_include_segments
+    global _cache_worker_stop_on_bad_chunk_data
     _cache_worker_y_min = y_min
     _cache_worker_y_max = y_max
     _cache_worker_include_segments = include_segments
+    _cache_worker_stop_on_bad_chunk_data = bool(stop_on_bad_chunk_data)
     _cache_worker_world = amulet.load_level(world_root)
     _cache_worker_get_chunk = probe_chunk_getter(_cache_worker_world, dim_id, [probe_coord])
 
@@ -4176,7 +4319,9 @@ def _cache_scan_one_chunk(coord: Tuple[int, int]) -> Tuple[int, int, Optional[Di
     cx, cz = coord
     try:
         chunk = _cache_worker_get_chunk(cx, cz)
-    except Exception:
+    except Exception as exc:
+        if _cache_worker_stop_on_bad_chunk_data:
+            raise RuntimeError(f"Bad chunk data while loading chunk ({cx},{cz}): {type(exc).__name__}: {exc}") from exc
         return cx, cz, None
     if chunk is None:
         return cx, cz, None
@@ -4194,9 +4339,11 @@ def build_snapshot_cache(
     dimension: str,
     y_min: int,
     y_max: int,
+    stop_on_bad_chunk_data: bool = False,
     log_cb: Optional[Callable[[str], None]] = None,
     progress_cb: Optional[Callable[[int, int, float], None]] = None,
     cancel_event: Optional[threading.Event] = None,
+    stats_out: Optional[Dict[str, Any]] = None,
 ) -> str:
     source_path = snapshot.raw_path or snapshot.path
     if is_cache_file(source_path):
@@ -4210,7 +4357,7 @@ def build_snapshot_cache(
         t0_total = time.time()
         _tmp_root, candidates = _resolve_snapshot_world_roots(source_path, tmpdir)
         if not candidates:
-            raise RuntimeError("Could not find a world folder to cache (no level.dat found).")
+            raise RuntimeError("Could not find a world folder to cache in archive/folder input.")
 
         world_root = sorted(
             [(r, _score_world_root_path(r)) for r in candidates],
@@ -4268,120 +4415,312 @@ def build_snapshot_cache(
 
         processed = 0
         written_chunks = 0
+        skipped_chunks: Dict[Tuple[int, int], str] = {}  # {(cx, cz): skip_reason}
+        _written_cxs: List[int] = []  # actual written chunk X coords (for correcting bounding box)
+        _written_czs: List[int] = []  # actual written chunk Z coords
 
         # Use 'spawn' context explicitly for Windows compatibility.
         ctx = multiprocessing.get_context("spawn")
-        try:
-            pool = ctx.Pool(
-                processes=n_workers,
-                initializer=_cache_worker_init,
-                initargs=(world_root, dim_id, int(y_min), int(y_max), include_segments, chunk_coords[0]),
-            )
-        except Exception as pool_exc:
-            raise RuntimeError(
-                f"Failed to start cache scanning worker: {pool_exc}"
-            ) from pool_exc
 
-        if log_cb is not None:
-            log_cb(f"Worker ready. Scanning {total} chunks for {snapshot.display_name}...")
+        # Stalled workers on very large/modded worlds are hard to distinguish
+        # from slow progress. We treat long no-progress windows as a stall and
+        # retry the remaining chunks with smaller batch sizes.
+        stall_timeout_s = 180.0
+        retry_chunksizes = [16, 4, 1]
+        pending_coords: List[Tuple[int, int]] = list(chunk_coords)
+        consecutive_zero_progress_stalls = 0
 
-        # A watcher thread terminates the pool within 0.3 s of cancel being set,
-        # which unblocks the for-loop below without needing the non-standard
-        # IMapIterator.next(timeout=) call (unavailable on plain generators).
-        _stop_watcher = threading.Event()
+        def _process_scanned_chunk(cx: int, cz: int, scanned: Optional[Dict[str, Any]], skip_reason: Optional[str] = None) -> None:
+            nonlocal processed, written_chunks
+            if skip_reason is not None:
+                skipped_chunks[(int(cx), int(cz))] = skip_reason
+            if scanned is not None:
+                top_id = np.zeros((16, 16), dtype=np.uint32)
+                dry_id = np.zeros((16, 16), dtype=np.uint32)
+                for lz in range(16):
+                    for lx in range(16):
+                        flat = lz * 16 + lx
+                        if int(scanned["top_found"][lz, lx]) != 0:
+                            top_id[lz, lx] = writer.ensure_block_id(scanned["top_raw"][flat])
+                        if int(scanned["dry_found"][lz, lx]) != 0:
+                            dry_id[lz, lx] = writer.ensure_block_id(scanned["dry_raw"][flat])
 
-        def _cancel_watcher_fn(_evt=_stop_watcher, _ce=cancel_event, _p=pool):
-            while not _evt.wait(timeout=0.3):
-                if _ce is not None and _ce.is_set():
-                    try:
-                        _p.terminate()
-                    except Exception:
-                        pass
-                    return
-
-        _watcher = threading.Thread(target=_cancel_watcher_fn, daemon=True)
-        _watcher.start()
-
-        try:
-            for cx, cz, scanned in pool.imap_unordered(
-                _cache_scan_one_chunk, chunk_coords, chunksize=16
-            ):
-                if cancel_event is not None and cancel_event.is_set():
-                    pool.terminate()
-                    raise CancelledError("Cancelled during cache build.")
-
-                if scanned is not None:
-                    top_id = np.zeros((16, 16), dtype=np.uint32)
-                    dry_id = np.zeros((16, 16), dtype=np.uint32)
-                    for lz in range(16):
-                        for lx in range(16):
-                            flat = lz * 16 + lx
-                            if int(scanned["top_found"][lz, lx]) != 0:
-                                top_id[lz, lx] = writer.ensure_block_id(scanned["top_raw"][flat])
-                            if int(scanned["dry_found"][lz, lx]) != 0:
-                                dry_id[lz, lx] = writer.ensure_block_id(scanned["dry_raw"][flat])
-
-                    if include_segments:
-                        seg_block_id = np.asarray(
-                            [writer.ensure_block_id(raw) for raw in scanned["seg_raw"]],
-                            dtype=np.uint32,
-                        )
-                        deep_payload = encode_deep_payload(
-                            scanned["offsets"],
-                            np.asarray(scanned["seg_top"], dtype=np.int16),
-                            np.asarray(scanned["seg_bottom"], dtype=np.int16),
-                            seg_block_id,
-                        )
-                    else:
-                        deep_payload = None
-
-                    surface_payload = encode_surface_payload(
-                        top_id,
-                        scanned["top_y"],
-                        scanned["top_found"],
-                        dry_id,
-                        scanned["dry_y"],
-                        scanned["dry_found"],
+                if include_segments:
+                    seg_block_id = np.asarray(
+                        [writer.ensure_block_id(raw) for raw in scanned["seg_raw"]],
+                        dtype=np.uint32,
                     )
-                    writer.write_chunk(cx, cz, surface_payload, deep_payload)
-                    written_chunks += 1
+                    deep_payload = encode_deep_payload(
+                        scanned["offsets"],
+                        np.asarray(scanned["seg_top"], dtype=np.int16),
+                        np.asarray(scanned["seg_bottom"], dtype=np.int16),
+                        seg_block_id,
+                    )
+                else:
+                    deep_payload = None
 
-                processed += 1
-                if progress_cb is not None:
-                    progress_cb(processed, total, processed / max(1, total))
-                if log_cb is not None and (processed == 1 or (processed % 200) == 0 or processed == total):
-                    log_cb(f"Caching {snapshot.display_name}: chunk {processed}/{total}")
+                surface_payload = encode_surface_payload(
+                    top_id,
+                    scanned["top_y"],
+                    scanned["top_found"],
+                    dry_id,
+                    scanned["dry_y"],
+                    scanned["dry_found"],
+                )
+                writer.write_chunk(cx, cz, surface_payload, deep_payload)
+                written_chunks += 1
+                _written_cxs.append(int(cx))
+                _written_czs.append(int(cz))
+            elif skip_reason is None:
+                # Chunk data was None but no explicit reason given (empty or load error)
+                skipped_chunks[(int(cx), int(cz))] = "empty or load error"
 
-            pool.close()
-            pool.join()
-        except CancelledError:
-            pool.terminate()
-            _jt = threading.Thread(target=pool.join, daemon=True)
-            _jt.start()
-            _jt.join(timeout=5.0)
-            raise
-        except Exception:
-            pool.terminate()
-            _jt = threading.Thread(target=pool.join, daemon=True)
-            _jt.start()
-            _jt.join(timeout=5.0)
+            processed += 1
+            if progress_cb is not None:
+                progress_cb(processed, total, processed / max(1, total))
+            if log_cb is not None and (processed == 1 or (processed % 200) == 0 or processed == total):
+                log_cb(f"Caching {snapshot.display_name}: chunk {processed}/{total}")
+
+        retry_i = 0
+        while pending_coords:
+            chunksize = retry_chunksizes[retry_i]
+            attempt_i = retry_i + 1
             if cancel_event is not None and cancel_event.is_set():
                 raise CancelledError("Cancelled during cache build.")
-            raise
-        finally:
-            _stop_watcher.set()
-            _watcher.join(timeout=1.0)
 
-        writer.finalize()
+            try:
+                pool = ctx.Pool(
+                    processes=n_workers,
+                    initializer=_cache_worker_init,
+                    initargs=(world_root, dim_id, int(y_min), int(y_max), include_segments, bool(stop_on_bad_chunk_data), pending_coords[0]),
+                )
+            except Exception as pool_exc:
+                raise RuntimeError(
+                    f"Failed to start cache scanning worker: {pool_exc}"
+                ) from pool_exc
+
+            if log_cb is not None:
+                if attempt_i == 1:
+                    log_cb(f"Worker ready. Scanning {total} chunks for {snapshot.display_name}...")
+                else:
+                    log_cb(
+                        f"[CACHE RETRY] Resuming remaining {len(pending_coords)} chunk(s) "
+                        f"with smaller batch size (attempt {attempt_i}/{len(retry_chunksizes)}, chunksize={chunksize})."
+                    )
+
+            result_q: "queue.Queue[Tuple[str, Any]]" = queue.Queue()
+            seen_coords: set = set()
+
+            def _producer(_pool=pool, _coords=pending_coords, _chunksize=chunksize):
+                try:
+                    for item in _pool.imap_unordered(_cache_scan_one_chunk, _coords, chunksize=_chunksize):
+                        result_q.put(("item", item))
+                    result_q.put(("done", None))
+                except Exception as exc:
+                    result_q.put(("error", exc))
+
+            producer_t = threading.Thread(target=_producer, daemon=True)
+            producer_t.start()
+
+            stalled = False
+            last_progress_t = time.time()
+
+            try:
+                while True:
+                    if cancel_event is not None and cancel_event.is_set():
+                        pool.terminate()
+                        raise CancelledError("Cancelled during cache build.")
+
+                    try:
+                        msg, payload = result_q.get(timeout=1.0)
+                    except queue.Empty:
+                        if (time.time() - last_progress_t) >= stall_timeout_s:
+                            stalled = True
+                            break
+                        continue
+
+                    if msg == "item":
+                        cx, cz, scanned = payload
+                        seen_coords.add((int(cx), int(cz)))
+                        _process_scanned_chunk(int(cx), int(cz), scanned)
+                        last_progress_t = time.time()
+                    elif msg == "done":
+                        break
+                    elif msg == "error":
+                        raise RuntimeError(f"Cache scanning worker failed: {payload}") from payload
+
+                if stalled:
+                    try:
+                        pool.terminate()
+                    except Exception:
+                        pass
+                    _jt = threading.Thread(target=pool.join, daemon=True)
+                    _jt.start()
+                    _jt.join(timeout=5.0)
+                    producer_t.join(timeout=1.0)
+
+                    pending_coords = [c for c in pending_coords if c not in seen_coords]
+                    if len(seen_coords) == 0:
+                        consecutive_zero_progress_stalls += 1
+                    else:
+                        consecutive_zero_progress_stalls = 0
+                    if log_cb is not None:
+                        log_cb(
+                            f"[CACHE RETRY] No chunk progress for {int(stall_timeout_s)}s. "
+                            f"Completed {len(seen_coords)} chunk(s) in this pass; "
+                            f"{len(pending_coords)} still pending."
+                        )
+                    if attempt_i >= len(retry_chunksizes):
+                        if stop_on_bad_chunk_data:
+                            raise RuntimeError(
+                                f"Cache scan stalled after {int(stall_timeout_s)}s without progress "
+                                f"(remaining chunks: {len(pending_coords)})."
+                            )
+
+                        # Non-strict mode: isolate by dropping one likely-stuck chunk
+                        # and continue scanning the rest instead of failing the run.
+                        if pending_coords:
+                            # If we repeatedly stall with zero completed chunks,
+                            # assume a cluster of problematic chunks and skip a
+                            # small batch to avoid looking hung for long periods.
+                            skip_count = 1
+                            if consecutive_zero_progress_stalls >= 4:
+                                skip_count = min(32, len(pending_coords))
+                            elif consecutive_zero_progress_stalls >= 2:
+                                skip_count = min(8, len(pending_coords))
+
+                            skipped_now = pending_coords[:skip_count]
+                            if log_cb is not None:
+                                if skip_count == 1:
+                                    bad_cx, bad_cz = skipped_now[0]
+                                    log_cb(
+                                        f"[CACHE SKIP] Chunk ({bad_cx},{bad_cz}) appears stuck after retries "
+                                        f"(chunksize {retry_chunksizes[0]}->{retry_chunksizes[-1]}). "
+                                        "Skipping this chunk and continuing."
+                                    )
+                                else:
+                                    first_cx, first_cz = skipped_now[0]
+                                    last_cx, last_cz = skipped_now[-1]
+                                    log_cb(
+                                        f"[CACHE SKIP] Repeated zero-progress stalls detected. "
+                                        f"Skipping {skip_count} suspect chunk(s), from "
+                                        f"({first_cx},{first_cz}) to ({last_cx},{last_cz}), and continuing."
+                                    )
+                            for bad_cx, bad_cz in skipped_now:
+                                _process_scanned_chunk(
+                                    int(bad_cx),
+                                    int(bad_cz),
+                                    None,
+                                    skip_reason="stalled after retries",
+                                )
+                            pending_coords = pending_coords[skip_count:]
+
+                        retry_i = 0
+                        continue
+
+                    retry_i += 1
+                    continue
+
+                pool.close()
+                pool.join()
+                producer_t.join(timeout=1.0)
+                pending_coords = []
+                retry_i = 0
+            except CancelledError:
+                try:
+                    pool.terminate()
+                except Exception:
+                    pass
+                _jt = threading.Thread(target=pool.join, daemon=True)
+                _jt.start()
+                _jt.join(timeout=5.0)
+                producer_t.join(timeout=1.0)
+                raise
+            except Exception:
+                try:
+                    pool.terminate()
+                except Exception:
+                    pass
+                _jt = threading.Thread(target=pool.join, daemon=True)
+                _jt.start()
+                _jt.join(timeout=5.0)
+                producer_t.join(timeout=1.0)
+                if cancel_event is not None and cancel_event.is_set():
+                    raise CancelledError("Cancelled during cache build.")
+                raise
+
+        if pending_coords:
+            raise RuntimeError(f"Cache build incomplete: {len(pending_coords)} chunk(s) not processed.")
+
+        # Recompute bounding box from actually-written chunks to exclude bogus
+        # extreme coordinates from corrupt/modded region headers, which would
+        # otherwise produce a multi-million-block canvas that renders as black.
+        finalize_extra: Optional[Dict[str, Any]] = None
+        if _written_cxs:
+            actual_min_cx = min(_written_cxs)
+            actual_max_cx = max(_written_cxs)
+            actual_min_cz = min(_written_czs)
+            actual_max_cz = max(_written_czs)
+            if (actual_min_cx != min_cx or actual_max_cx != max_cx or
+                    actual_min_cz != min_cz or actual_max_cz != max_cz):
+                finalize_extra = {
+                    "min_cx": int(actual_min_cx),
+                    "max_cx": int(actual_max_cx),
+                    "min_cz": int(actual_min_cz),
+                    "max_cz": int(actual_max_cz),
+                }
+                if log_cb is not None:
+                    log_cb(
+                        f"[CACHE] Corrected bounding box (bogus coords detected): "
+                        f"X=[{min_cx},{max_cx}] Z=[{min_cz},{max_cz}] → "
+                        f"X=[{actual_min_cx},{actual_max_cx}] Z=[{actual_min_cz},{actual_max_cz}]"
+                    )
+        writer.finalize(extra_metadata=finalize_extra)
         t_total = time.time() - t0_total
+        skipped_count = int(len(skipped_chunks))
+        skipped_pct = (100.0 * float(skipped_count) / float(max(1, total)))
+        skip_reason_counts: Dict[str, int] = {}
+        for _coord, _reason in skipped_chunks.items():
+            r = str(_reason or "unknown").strip() or "unknown"
+            skip_reason_counts[r] = int(skip_reason_counts.get(r, 0)) + 1
+
+        if stats_out is not None:
+            try:
+                stats_out.clear()
+                stats_out.update({
+                    "source": str(snapshot.display_name),
+                    "total_chunks": int(total),
+                    "chunks_written": int(written_chunks),
+                    "chunks_skipped": skipped_count,
+                    "skipped_percent": float(skipped_pct),
+                    "skipped_by_reason": dict(skip_reason_counts),
+                })
+            except Exception:
+                pass
+
         if log_cb is not None:
             log_cb(
                 f"Cache stats for {snapshot.display_name}: "
                 f"setup+load={t_load:.1f}s | workers={n_workers} | "
                 f"chunks_written={written_chunks}/{total} | "
+                f"chunks_skipped={skipped_count} | "
                 f"avg_rate={(written_chunks / max(0.001, t_total)):.1f} chunks/s | "
                 f"total={t_total:.1f}s"
             )
+            if skipped_chunks:
+                log_cb(f"File '{snapshot.display_name}' had {skipped_pct:.1f}% bad chunk data that had to be skipped.")
+                log_cb(f"Skipped chunks: (total={skipped_count})")
+                by_reason = {}
+                for coord, reason in skipped_chunks.items():
+                    if reason not in by_reason:
+                        by_reason[reason] = []
+                    by_reason[reason].append(coord)
+                for reason in sorted(by_reason.keys()):
+                    coords = by_reason[reason]
+                    coord_str = ", ".join(f"({cx},{cz})" for cx, cz in sorted(coords)[:5])
+                    if len(coords) > 5:
+                        coord_str += f" ... and {len(coords)-5} more"
+                    log_cb(f"  {reason}: {coord_str}")
             log_cb(f"Cache written: {cache_path}")
         return cache_path
     finally:
@@ -4450,6 +4789,42 @@ def _project_deep_chunk_arrays(
     }
 
 
+def _surface_cache_has_any_top_above(cache_path: str, y_max: int) -> Tuple[bool, int]:
+    """Return whether any cached top-surface column exceeds *y_max*.
+
+    Returns ``(has_above, max_top_seen)``. ``max_top_seen`` is the maximum
+    cached top-Y observed across all rows (or ``y_max`` if none are found).
+    """
+    max_seen: Optional[int] = None
+    limit = int(y_max)
+    for _cx, _cz, surface_payload, _deep_payload in iter_chunk_rows(cache_path):
+        arrays = decode_surface_payload(surface_payload)
+        found = arrays["top_found"].astype(bool)
+        if not np.any(found):
+            continue
+        ys = arrays["top_y"][found]
+        local_max = int(np.max(ys))
+        if max_seen is None or local_max > max_seen:
+            max_seen = local_max
+        if local_max > limit:
+            return True, int(max_seen)
+    return False, int(max_seen if max_seen is not None else limit)
+
+
+def _surface_cache_max_top_y(cache_path: str, default_y: int) -> int:
+    """Return the true maximum cached top-surface Y across all columns."""
+    max_seen: Optional[int] = None
+    for _cx, _cz, surface_payload, _deep_payload in iter_chunk_rows(cache_path):
+        arrays = decode_surface_payload(surface_payload)
+        found = arrays["top_found"].astype(bool)
+        if not np.any(found):
+            continue
+        local_max = int(np.max(arrays["top_y"][found]))
+        if max_seen is None or local_max > max_seen:
+            max_seen = local_max
+    return int(max_seen if max_seen is not None else int(default_y))
+
+
 def render_cached_world_map(
     cache_path: str,
     out_png: str,
@@ -4466,17 +4841,14 @@ def render_cached_world_map(
 
     if cache_dimension != opt.dimension:
         raise RuntimeError(f"Cache dimension mismatch: cache={cache_dimension}, requested={opt.dimension}")
-    if cache_mode == CACHE_MODE_SURFACE and (opt.y_min != cached_y_min or opt.y_max != cached_y_max):
-        raise RuntimeError(
-            f"Surface cache only supports Y=[{cached_y_min},{cached_y_max}] (its original build range). "
-            f"You requested Y=[{opt.y_min},{opt.y_max}]. "
-            "Change your Y range to match, or rebuild the cache using 'Cache all blocks'."
-        )
-    if cache_mode == CACHE_MODE_ALL_BLOCKS and (opt.y_min < cached_y_min or opt.y_max > cached_y_max):
-        raise RuntimeError(
-            f"Requested Y=[{opt.y_min},{opt.y_max}] is outside the all-blocks cache range [{cached_y_min},{cached_y_max}]. "
-            "Rebuild the cache with a wider Y range to cover your selection."
-        )
+    if cache_mode == CACHE_MODE_SURFACE and int(opt.y_max) < int(cached_y_max):
+        has_above, observed_max = _surface_cache_has_any_top_above(cache_path, int(opt.y_max))
+        if has_above:
+            raise RuntimeError(
+                f"Surface cache contains blocks above requested Y max: cache max surface Y={observed_max}, "
+                f"requested y_max={opt.y_max}. "
+                "Adjust Y max or rescan from raw source for this run."
+            )
 
     min_cx_filter = max_cx_filter = min_cz_filter = max_cz_filter = None
     if opt.limit_enabled:
@@ -4511,8 +4883,20 @@ def render_cached_world_map(
     w_px = int(np.ceil(width_blocks / bpp))
     h_px = int(np.ceil(height_blocks / bpp))
 
+    _validate_render_canvas_size(
+        w_px=w_px,
+        h_px=h_px,
+        min_x=min_x,
+        max_x=max_x,
+        min_z=min_z,
+        max_z=max_z,
+        bpp=bpp,
+        source_label="cache",
+    )
+
     rgb = np.zeros((h_px, w_px, 3), dtype=np.uint8)
-    hmap = np.full((h_px, w_px), opt.y_min, dtype=np.int16)
+    empty_y = int(cached_y_min) if cache_mode == CACHE_MODE_ALL_BLOCKS else int(opt.y_min)
+    hmap = np.full((h_px, w_px), empty_y, dtype=np.int16)
     block_lookup = read_block_lookup(cache_path)
     colored_cols = 0
     air_only_cols = 0
@@ -4532,8 +4916,8 @@ def render_cached_world_map(
         if cancel_event is not None and cancel_event.is_set():
             raise CancelledError("Cancelled during cache render.")
 
-        if cache_mode == CACHE_MODE_ALL_BLOCKS and deep_payload is not None and (opt.y_min != cached_y_min or opt.y_max != cached_y_max):
-            arrays = _project_deep_chunk_arrays(deep_payload, block_lookup, opt.y_min, opt.y_max)
+        if cache_mode == CACHE_MODE_ALL_BLOCKS and deep_payload is not None:
+            arrays = _project_deep_chunk_arrays(deep_payload, block_lookup, cached_y_min, cached_y_max)
         else:
             arrays = decode_surface_payload(surface_payload)
 
@@ -4573,7 +4957,7 @@ def render_cached_world_map(
                     colored_cols += 1
                 else:
                     rgb[iz, ix, :] = (0, 0, 0)
-                    hmap[iz, ix] = opt.y_min
+                    hmap[iz, ix] = empty_y
                     air_only_cols += 1
 
         chunks_rendered += 1
@@ -4671,7 +5055,7 @@ def render_snapshot_input(
                         progress_cb=progress_cb,
                         cancel_event=cancel_event,
                     )
-                if raw_src and (raw_src.lower().endswith(".zip") or is_world_folder(raw_src)):
+                if raw_src and (is_world_archive_file(raw_src) or is_world_folder(raw_src)):
                     if log_cb:
                         log_cb(
                             f"[FALLBACK] No all-blocks cache available. "
@@ -4711,7 +5095,7 @@ def render_snapshot_input(
         if stage_cb is not None:
             stage_cb(f"raw.resolve_world_roots.done candidates={len(candidates)}")
         if not candidates:
-            raise RuntimeError("Could not find a world folder (no level.dat found).")
+            raise RuntimeError("Could not find a world folder in archive/folder input.")
         last_error: Optional[Exception] = None
         for world_root in candidates:
             try:
@@ -4834,6 +5218,17 @@ def render_world_map(
             bpp = compute_blocks_per_pixel(width_blocks, height_blocks, target)
             w_px = int(np.ceil(width_blocks / bpp))
             h_px = int(np.ceil(height_blocks / bpp))
+
+            _validate_render_canvas_size(
+                w_px=w_px,
+                h_px=h_px,
+                min_x=min_x,
+                max_x=max_x,
+                min_z=min_z,
+                max_z=max_z,
+                bpp=bpp,
+                source_label="raw",
+            )
     
             rgb = np.zeros((h_px, w_px, 3), dtype=np.uint8)
             hmap = np.full((h_px, w_px), opt.y_min, dtype=np.int16)
@@ -5144,7 +5539,11 @@ def extract_index_from_name(zip_name: str) -> int:
 
 
 def find_zip_backups(folder: str) -> List[str]:
-    zips = [os.path.join(folder, f) for f in os.listdir(folder) if f.lower().endswith(".zip")]
+    zips = [
+        os.path.join(folder, f)
+        for f in os.listdir(folder)
+        if is_world_archive_file(f)
+    ]
     if not zips:
         return []
 
@@ -5305,6 +5704,144 @@ def align_and_composite_frames(
 
     return result
 
+
+def _snapshot_label_source_path(snapshot: SnapshotInput) -> str:
+    raw = str(getattr(snapshot, "raw_path", "") or "").strip()
+    if raw:
+        return raw
+    return str(getattr(snapshot, "path", "") or "").strip()
+
+
+def _frame_label_from_filename(snapshot: SnapshotInput) -> str:
+    src = _snapshot_label_source_path(snapshot)
+    if not src:
+        return ""
+    base = os.path.basename(src.rstrip("/\\"))
+    if not base:
+        return ""
+    stem, _ext = os.path.splitext(base)
+    return stem or base
+
+
+def _find_level_dat_timestamp(snapshot: SnapshotInput) -> Optional[datetime]:
+    src = _snapshot_label_source_path(snapshot)
+    if not src:
+        return None
+
+    if os.path.isdir(src):
+        best_path = None
+        best_depth = 10**9
+        for root, _dirs, files in os.walk(src):
+            for nm in files:
+                if str(nm).lower() != "level.dat":
+                    continue
+                p = os.path.join(root, nm)
+                rel = os.path.relpath(p, src)
+                depth = rel.count(os.sep)
+                if depth < best_depth:
+                    best_depth = depth
+                    best_path = p
+        if best_path and os.path.isfile(best_path):
+            try:
+                return datetime.fromtimestamp(os.path.getmtime(best_path))
+            except Exception:
+                return None
+        return None
+
+    if os.path.isfile(src) and is_world_archive_file(src):
+        try:
+            with zipfile.ZipFile(src, "r") as zf:
+                best_info = None
+                best_depth = 10**9
+                for info in zf.infolist():
+                    name = str(getattr(info, "filename", "") or "")
+                    if not name:
+                        continue
+                    nlow = name.replace("\\", "/").lower()
+                    if not nlow.endswith("/level.dat") and nlow != "level.dat":
+                        continue
+                    depth = nlow.count("/")
+                    if depth < best_depth:
+                        best_depth = depth
+                        best_info = info
+                if best_info is not None:
+                    dt = tuple(int(v) for v in best_info.date_time[:6])
+                    return datetime(*dt)
+        except Exception:
+            return None
+
+    return None
+
+
+def _frame_label_from_backup_date(snapshot: SnapshotInput) -> str:
+    ts = _find_level_dat_timestamp(snapshot)
+    if ts is None:
+        return ""
+    return ts.strftime("%Y-%m-%d")
+
+
+def _resolve_frame_label(snapshot: SnapshotInput, mode: str) -> str:
+    m = str(mode or "").strip().lower()
+    if m == "use filename":
+        return _frame_label_from_filename(snapshot)
+    if m == "extract date from backup":
+        return _frame_label_from_backup_date(snapshot)
+    return ""
+
+
+def _load_arial_font(font_px: int) -> ImageFont.ImageFont:
+    size = max(8, int(font_px))
+    for font_name in ("arial.ttf", "Arial.ttf"):
+        try:
+            return ImageFont.truetype(font_name, size=size)
+        except Exception:
+            pass
+    return ImageFont.load_default()
+
+
+def _overlay_frame_label(frame_path: str, text: str) -> bool:
+    label = str(text or "").strip()
+    if not label:
+        return False
+
+    try:
+        with Image.open(frame_path).convert("RGB") as img:
+            draw = ImageDraw.Draw(img)
+            base_font_px = max(10, int(round(float(img.height) * 0.09)))
+            font_px = base_font_px
+            margin = 0
+            stroke_w = 1
+
+            while font_px >= 10:
+                font = _load_arial_font(font_px)
+                m_bbox = draw.textbbox((0, 0), "m", font=font, stroke_width=0)
+                margin = max(1, int(max(1, m_bbox[2] - m_bbox[0])))
+                stroke_w = max(1, int(round(float(font_px) * 0.015)))
+                t_bbox = draw.textbbox((0, 0), label, font=font, stroke_width=stroke_w)
+                text_w = max(1, int(t_bbox[2] - t_bbox[0]))
+                if text_w <= max(1, img.width - (2 * margin)):
+                    break
+                font_px = max(9, int(round(font_px * 0.9)))
+                if font_px <= 10:
+                    break
+
+            font = _load_arial_font(font_px)
+            t_bbox = draw.textbbox((0, 0), label, font=font, stroke_width=stroke_w)
+            text_h = max(1, int(t_bbox[3] - t_bbox[1]))
+            x = margin
+            y = max(0, img.height - margin - text_h)
+            draw.text(
+                (x, y),
+                label,
+                font=font,
+                fill=(255, 255, 255),
+                stroke_width=stroke_w,
+                stroke_fill=(0, 0, 0),
+            )
+            img.save(frame_path)
+        return True
+    except Exception:
+        return False
 
 
 def build_gif(frame_paths: List[str], out_gif: str, seconds_per_frame: float, loop: int = 0):
@@ -5674,20 +6211,52 @@ def worker_run(snapshots: List[SnapshotInput],
         if requested_cache_mode != CACHE_MODE_NONE:
             log(
                 f"[CACHE OUTPUT] Prebuilding '{requested_cache_mode}' sidecar caches before render "
-                "for raw snapshots when missing or mismatched."
+                "when missing or mismatched for this run's settings."
             )
             prepared_snapshots: List[SnapshotInput] = []
             total_prep = len(snapshots)
 
+            def _cache_is_usable_for_render(cache_path: str, raw_src: str) -> bool:
+                try:
+                    if not is_cache_file(cache_path):
+                        return False
+                    header = read_cache_header(cache_path)
+                    if raw_src:
+                        sig = build_source_signature(raw_src)
+                        for _k in ("source_kind", "source_name", "source_size", "source_mtime_ns"):
+                            if header.get(_k) != sig.get(_k):
+                                return False
+                    if str(header.get("dimension", "")) != str(opt.dimension):
+                        return False
+                    mode_h = str(header.get("cache_mode", ""))
+                    y0_h = int(header.get("y_min", 0))
+                    y1_h = int(header.get("y_max", 0))
+                    if mode_h == CACHE_MODE_SURFACE:
+                        if int(opt.y_min) == y0_h and int(opt.y_max) == y1_h:
+                            return True
+                        if int(opt.y_max) >= y1_h:
+                            return True
+                        has_above, _observed = _surface_cache_has_any_top_above(cache_path, int(opt.y_max))
+                        return not has_above
+                    if mode_h == CACHE_MODE_ALL_BLOCKS:
+                        return True
+                    return False
+                except Exception:
+                    return False
+
             # Quick pre-scan (header check only) to know how many actually need building.
             _needs_build_count = 0
             for _s in snapshots:
-                if not is_cache_file(_s.path):
-                    _raw = _s.raw_path or _s.path
-                    _cp = sidecar_cache_path(_raw, opt.dimension, requested_cache_mode)
-                    _ok, _ = _cache_mismatch_reason(_cp, _raw, requested_cache_mode, opt.dimension, opt.y_min, opt.y_max)
-                    if not _ok:
-                        _needs_build_count += 1
+                _raw = _s.raw_path or (_s.path if not is_cache_file(_s.path) else "")
+                _can_build = bool(_raw) and (is_world_archive_file(_raw) or is_world_folder(_raw))
+                if is_cache_file(_s.path) and _cache_is_usable_for_render(_s.path, _raw):
+                    continue
+                if not _can_build:
+                    continue
+                _cp = sidecar_cache_path(_raw, opt.dimension, requested_cache_mode)
+                _ok, _ = _cache_mismatch_reason(_cp, _raw, requested_cache_mode, opt.dimension, opt.y_min, opt.y_max)
+                if not _ok:
+                    _needs_build_count += 1
             total_needs_build = max(1, _needs_build_count)
             completed_builds = [0]
             cache_phase_t0 = [time.time()]
@@ -5701,11 +6270,22 @@ def worker_run(snapshots: List[SnapshotInput],
                     log("[CACHE OUTPUT] Stop requested during cache preparation.")
                     break
 
-                if is_cache_file(snap.path):
+                raw_src = snap.raw_path or (snap.path if not is_cache_file(snap.path) else "")
+                can_build = bool(raw_src) and (is_world_archive_file(raw_src) or is_world_folder(raw_src))
+
+                if is_cache_file(snap.path) and _cache_is_usable_for_render(snap.path, raw_src):
                     prepared_snapshots.append(snap)
                     continue
 
-                raw_src = snap.raw_path or snap.path
+                if not can_build:
+                    if is_cache_file(snap.path):
+                        log(
+                            f"[CACHE OUTPUT] {prep_i:02d}/{total_prep:02d} keeping existing cache "
+                            f"(no raw source available to rebuild): {os.path.basename(snap.path)}"
+                        )
+                    prepared_snapshots.append(snap)
+                    continue
+
                 target_cache_path = sidecar_cache_path(raw_src, opt.dimension, requested_cache_mode)
                 is_match, reason = _cache_mismatch_reason(
                     target_cache_path,
@@ -5765,12 +6345,20 @@ def worker_run(snapshots: List[SnapshotInput],
                         f"[CACHE OUTPUT] {prep_i:02d}/{total_prep:02d} building cache for {snap.display_name} "
                         f"({reason})"
                     )
+                    snap_for_build = SnapshotInput(
+                        kind="zip" if os.path.isfile(raw_src) else "folder",
+                        path=raw_src,
+                        display_name=snap.display_name,
+                        sort_name=snap.sort_name,
+                        raw_path=raw_src,
+                    )
                     built_cache_path = build_snapshot_cache(
-                        snapshot=snap,
+                        snapshot=snap_for_build,
                         cache_mode=requested_cache_mode,
                         dimension=opt.dimension,
                         y_min=opt.y_min,
                         y_max=opt.y_max,
+                        stop_on_bad_chunk_data=bool(getattr(opt, "stop_on_bad_chunk_data", False)),
                         log_cb=lambda m: log(f"[CACHE OUTPUT] {m}"),
                         progress_cb=_cache_progress_cb,
                         cancel_event=cancel_event,
@@ -5924,6 +6512,7 @@ def worker_run(snapshots: List[SnapshotInput],
         total_cache_snapshots = max(0, total_zips - total_raw_snapshots)
         chronological = list(reversed(snapshots))  # oldest -> newest
         frame_no_by_path = {snap.path: i+1 for i, snap in enumerate(chronological)}
+        snapshot_by_frame_no = {i + 1: snap for i, snap in enumerate(chronological)}
 
         # Build display-name-based PNG paths, deduplicating when multiple snapshots share the same display name.
         _dn_total: Dict[str, int] = {}
@@ -6039,6 +6628,7 @@ def worker_run(snapshots: List[SnapshotInput],
         # in_flight_frames: future -> (snapshot, zip_i, start_time, source_label, stage_path)
         in_flight_frames: Dict[object, Tuple[Any, int, float, str, str]] = {}
         pending_zips_queue: deque = deque([(snapshot, i+1) for i, snapshot in enumerate(snapshots)])
+        source_hint_cache: Dict[str, str] = {}
         
         last_cpu_check = time.time()
         cpu_check_interval = 2.0
@@ -6105,6 +6695,59 @@ def worker_run(snapshots: List[SnapshotInput],
                 except Exception:
                     return None
 
+            def _cache_likely_raw_fallback(snapshot: SnapshotInput) -> bool:
+                """Best-effort preflight: detect cache snapshots likely to fall back to raw scan."""
+                try:
+                    if not is_cache_file(snapshot.path):
+                        return False
+                    raw_src = snapshot.raw_path or ""
+                    if not raw_src or (not is_world_archive_file(raw_src) and not is_world_folder(raw_src)):
+                        return False
+
+                    header = read_cache_header(snapshot.path)
+                    cache_mode = str(header.get("cache_mode", "")).strip().lower()
+                    if cache_mode != CACHE_MODE_SURFACE:
+                        return False
+
+                    cache_y_min = int(header.get("y_min", opt.y_min))
+                    cache_y_max = int(header.get("y_max", opt.y_max))
+                    if int(opt.y_min) == cache_y_min and int(opt.y_max) == cache_y_max:
+                        return False
+
+                    allb_path = sidecar_cache_path(raw_src, opt.dimension, CACHE_MODE_ALL_BLOCKS)
+                    if os.path.isfile(allb_path):
+                        allb_ok, _allb_reason = _cache_mismatch_reason(
+                            allb_path,
+                            raw_src,
+                            CACHE_MODE_ALL_BLOCKS,
+                            opt.dimension,
+                            opt.y_min,
+                            opt.y_max,
+                        )
+                        if allb_ok:
+                            return False
+
+                    return True
+                except Exception:
+                    return False
+
+            def _source_label(snapshot: SnapshotInput, stage_path: Optional[str] = None) -> str:
+                if stage_path:
+                    stage_now = str(_read_last_stage(stage_path)).strip().lower()
+                    if stage_now.startswith("raw."):
+                        return "raw"
+
+                cache_key = f"{snapshot.path}|{snapshot.raw_path}|{opt.dimension}|{opt.y_min}|{opt.y_max}"
+                cached = source_hint_cache.get(cache_key)
+                if cached:
+                    return cached
+
+                label = "cache" if is_cache_file(snapshot.path) else "raw"
+                if label == "cache" and _cache_likely_raw_fallback(snapshot):
+                    label = "raw"
+                source_hint_cache[cache_key] = label
+                return label
+
             def submit_frame(snapshot: SnapshotInput, zip_i: int):
                 """Submit a single frame render task, return Future"""
                 name = snapshot.display_name
@@ -6112,7 +6755,7 @@ def worker_run(snapshots: List[SnapshotInput],
                 frame_png = frame_png_by_path.get(snapshot.path, os.path.join(frames_dir, f"frame_{zip_i:04d}.png"))
                 debug_snapshot_path = os.path.join(run_dir, f"debug_block_ids_{zip_i:03d}_{safe_filename(name)}.txt")
                 stage_path = _stage_file_path(zip_i, name)
-                src_label = "cache" if is_cache_file(snapshot.path) else "raw"
+                src_label = _source_label(snapshot)
                 opt_for_task = clone_render_options(opt)
                 if src_label == "raw":
                     opt_for_task.workers = raw_frame_workers
@@ -6132,9 +6775,6 @@ def worker_run(snapshots: List[SnapshotInput],
                 with frame_lock:
                     in_flight_frames[future] = (snapshot, zip_i, start_time, src_label, stage_path)
                 return future
-
-            def _source_label(snapshot: SnapshotInput) -> str:
-                return "cache" if is_cache_file(snapshot.path) else "raw"
 
             def _inflight_counts() -> Tuple[int, int]:
                 with frame_lock:
@@ -6358,7 +6998,8 @@ def worker_run(snapshots: List[SnapshotInput],
                                 rendered_frames.append((frame_no, frame_png, bounds))
                                 elapsed = max(0.0, time.time() - float(start_time or time.time()))
                                 zip_times.append(elapsed)
-                                if str(_src).lower() == "raw":
+                                observed_src = _source_label(snapshot, _stage)
+                                if observed_src == "raw":
                                     raw_zip_times.append(elapsed)
                                 else:
                                     cache_zip_times.append(elapsed)
@@ -6572,16 +7213,18 @@ def worker_run(snapshots: List[SnapshotInput],
                 frame_png = frame_png_by_path.get(snapshot.path, os.path.join(frames_dir, f"frame_{zip_i:04d}.png"))
                 debug_snapshot_path = os.path.join(run_dir, f"debug_block_ids_{zip_i:03d}_{safe_filename(name)}.txt")
                 stage_path = _stage_file_path(zip_i, name)
-                log(f"[FRAME RETRY] #{zip_i:03d}/{total_zips:03d} {name} [source={src_label}]")
+                stage_name_before_retry = _read_last_stage(stage_path)
+                retry_source = "raw" if str(stage_name_before_retry).strip().lower().startswith("raw.") else str(src_label).lower()
+                log(f"[FRAME RETRY] #{zip_i:03d}/{total_zips:03d} {name} [source={retry_source}]")
 
                 # Hard timeout per retry so a single stuck frame cannot hang the whole run.
                 # Raw frames restart the full chunk scan from scratch, so allow 3 hours.
-                retry_timeout_s = (3 * 60 * 60) if str(src_label).lower() == "raw" else (10 * 60)
+                retry_timeout_s = (3 * 60 * 60) if retry_source == "raw" else (10 * 60)
                 retry_executor = ProcessPoolExecutor(max_workers=1)
                 _register_process_pool(retry_executor)
                 try:
                     retry_opt = clone_render_options(opt)
-                    if str(src_label).lower() == "raw":
+                    if retry_source == "raw":
                         retry_opt.workers = raw_frame_workers
                     else:
                         retry_opt.workers = max(1, int(opt.workers))
@@ -6683,35 +7326,59 @@ def worker_run(snapshots: List[SnapshotInput],
                     "stopped_mode": "partial_gif",
                 }))
                 return
-            # Collect Y-range info from all cache files to give an actionable advisory.
+            # Build targeted advisories from actual failure reasons so users don't
+            # get a misleading Y-range message for unrelated failures.
             y_range_advisory = ""
+            extent_advisory = ""
+            reason_blob = " ".join(str(reason or "").lower() for _name, reason, _err in skipped)
+            has_extent_failure = (
+                "[extent]" in reason_blob
+                or ("memoryerror" in reason_blob and "unable to allocate" in reason_blob)
+                or ("unable to allocate" in reason_blob and "shape" in reason_blob)
+            )
+            has_y_related_failure = (
+                "requested y max" in reason_blob
+                or "y_mismatch" in reason_blob
+                or "surface cache incompatible with y=" in reason_blob
+                or "surface cache contains blocks above requested y max" in reason_blob
+            )
+
+            if has_extent_failure:
+                extent_advisory = (
+                    "\n\nDetected issue: render extent too large for one frame. "
+                    "This usually means chunks exist very far apart (for example, far-lands or distant creative builds). "
+                    "Use 'Limit render area' (X/Z), enable auto-crop, or render multiple regional clips instead of one global frame."
+                )
+
             try:
-                seen_ranges: set = set()
-                for snap in snapshots:
-                    cache_src = snap.cache_path or (snap.path if is_cache_file(snap.path) else None)
-                    if cache_src and os.path.isfile(cache_src):
-                        try:
-                            h = read_cache_header(cache_src)
-                            y_lo = int(h.get("y_min", 0))
-                            y_hi = int(h.get("y_max", 0))
-                            mode = str(h.get("cache_mode", CACHE_MODE_SURFACE))
-                            seen_ranges.add((y_lo, y_hi, mode))
-                        except Exception:
-                            pass
-                if seen_ranges:
-                    lines = []
-                    for y_lo, y_hi, mode in sorted(seen_ranges):
-                        mode_label = "surface" if mode == CACHE_MODE_SURFACE else "all-blocks" if mode == CACHE_MODE_ALL_BLOCKS else mode
-                        lines.append(f"  Y=[{y_lo},{y_hi}] ({mode_label} cache)")
-                    y_range_advisory = (
-                        f"\n\nYour caches support:\n" + "\n".join(lines) +
-                        f"\n\nYou requested Y=[{opt.y_min},{opt.y_max}]. "
-                        "Adjust the Y range to match one of the above, or rebuild caches with 'Cache all blocks'."
-                    )
+                if has_y_related_failure and not has_extent_failure:
+                    seen_ranges: set = set()
+                    for snap in snapshots:
+                        cache_src = snap.cache_path or (snap.path if is_cache_file(snap.path) else None)
+                        if cache_src and os.path.isfile(cache_src):
+                            try:
+                                h = read_cache_header(cache_src)
+                                y_lo = int(h.get("y_min", 0))
+                                y_hi = int(h.get("y_max", 0))
+                                mode = str(h.get("cache_mode", CACHE_MODE_SURFACE))
+                                seen_ranges.add((y_lo, y_hi, mode))
+                            except Exception:
+                                pass
+                    if seen_ranges:
+                        lines = []
+                        for y_lo, y_hi, mode in sorted(seen_ranges):
+                            mode_label = "surface" if mode == CACHE_MODE_SURFACE else "all-blocks" if mode == CACHE_MODE_ALL_BLOCKS else mode
+                            lines.append(f"  Y=[{y_lo},{y_hi}] ({mode_label} cache)")
+                        y_range_advisory = (
+                            f"\n\nYour caches support:\n" + "\n".join(lines) +
+                            f"\n\nYou requested Y=[{opt.y_min},{opt.y_max}]. "
+                            "Adjust the Y range to match one of the above, or rebuild caches with 'Cache all blocks'."
+                        )
             except Exception:
                 pass
             msgq.put(("error",
                 "All backups failed to render; no frames were produced." +
+                extent_advisory +
                 y_range_advisory +
                 "\n\nCheck skipped_backups.txt and run.log in the output folder for details."
             ))
@@ -6729,6 +7396,27 @@ def worker_run(snapshots: List[SnapshotInput],
         rendered_frames_sorted = sorted(rendered_frames, key=lambda t: t[0])
         aligned_dir = os.path.join(frames_dir, "aligned")
         gif_frame_paths = align_and_composite_frames(rendered_frames_sorted, aligned_dir, log)
+
+        label_mode = str(getattr(opt, "frame_label_mode", "No label") or "No label")
+        if label_mode.strip().lower() != "no label":
+            labeled_count = 0
+            missing_count = 0
+            for i, (frame_no, _frame_png, _bounds) in enumerate(rendered_frames_sorted):
+                if i >= len(gif_frame_paths):
+                    break
+                snap = snapshot_by_frame_no.get(int(frame_no))
+                if snap is None:
+                    continue
+                label_text = _resolve_frame_label(snap, label_mode)
+                if not label_text:
+                    missing_count += 1
+                    continue
+                if _overlay_frame_label(gif_frame_paths[i], label_text):
+                    labeled_count += 1
+            log(
+                f"[LABEL] Mode='{label_mode}' applied to {labeled_count}/{len(rendered_frames_sorted)} frame(s)"
+                + (f" ({missing_count} frame(s) missing label data)." if missing_count else ".")
+            )
 
         world_name = ""
         try:
@@ -6907,12 +7595,22 @@ def _cache_matches_requested_settings(cache_path: str, source_path: str, cache_m
     for key in ("source_kind", "source_name", "source_size", "source_mtime_ns"):
         if header.get(key) != sig.get(key):
             return False
-    return (
-        str(header.get("cache_mode", "")) == str(cache_mode)
-        and str(header.get("dimension", "")) == str(dimension)
-        and int(header.get("y_min", 0)) == int(y_min)
-        and int(header.get("y_max", 0)) == int(y_max)
-    )
+    mode_h = str(header.get("cache_mode", ""))
+    dim_h = str(header.get("dimension", ""))
+    y0_h = int(header.get("y_min", 0))
+    y1_h = int(header.get("y_max", 0))
+    if mode_h != str(cache_mode) or dim_h != str(dimension):
+        return False
+    if mode_h == CACHE_MODE_ALL_BLOCKS:
+        return True
+    if y0_h == int(y_min) and y1_h == int(y_max):
+        return True
+    if mode_h == CACHE_MODE_SURFACE:
+        if int(y_max) >= y1_h:
+            return True
+        has_above, _ = _surface_cache_has_any_top_above(cache_path, int(y_max))
+        return not has_above
+    return False
 
 
 def _cache_mismatch_reason(
@@ -6952,6 +7650,20 @@ def _cache_mismatch_reason(
         return False, f"mode_mismatch:{mode_h}->{cache_mode}"
     if dim_h != str(dimension):
         return False, f"dimension_mismatch:{dim_h}->{dimension}"
+    if mode_h == CACHE_MODE_ALL_BLOCKS:
+        return True, "match(all_blocks:y_agnostic)"
+
+    if y0_h == int(y_min) and y1_h == int(y_max):
+        return True, "match"
+
+    if mode_h == CACHE_MODE_SURFACE:
+        if int(y_max) >= y1_h:
+            return True, f"match(surface_max_within_request:{y1_h}<={y_max})"
+        has_above, observed = _surface_cache_has_any_top_above(cache_path, int(y_max))
+        if not has_above:
+            return True, f"match(surface_scan:max_top={observed}<=requested_y_max={y_max})"
+        return False, f"y_mismatch(surface_scan:max_top={observed}>requested_y_max={y_max})"
+
     if y0_h != int(y_min) or y1_h != int(y_max):
         return False, f"y_mismatch:[{y0_h},{y1_h}]->[{y_min},{y_max}]"
 
@@ -6964,6 +7676,7 @@ def cache_build_worker(
     dimensions: "Union[str, List[str]]",
     y_min: int,
     y_max: int,
+    stop_on_bad_chunk_data: bool,
     msgq: "queue.Queue[tuple]",
     cancel_event: threading.Event,
 ):
@@ -6987,6 +7700,7 @@ def cache_build_worker(
     total_built = 0
     total_skipped = 0
     total_failed = 0
+    problem_files: List[Dict[str, Any]] = []
 
     def log(msg: str):
         msgq.put(("log", msg))
@@ -7093,15 +7807,19 @@ def cache_build_worker(
             )))
 
         try:
+            cache_stats: Dict[str, Any] = {}
             build_snapshot_cache(
                 snapshot, cache_mode, dimension, y_min, y_max,
+                stop_on_bad_chunk_data=bool(stop_on_bad_chunk_data),
                 log_cb=log, progress_cb=chunk_progress, cancel_event=cancel_event,
+                stats_out=cache_stats,
             )
             return {
                 "status": "built",
                 "item_index": item_index,
                 "item_label": item_label,
                 "chunks_total": _local_seen_total[0],
+                "cache_stats": cache_stats,
             }
         except CancelledError:
             return {"status": "cancelled", "item_index": item_index}
@@ -7140,6 +7858,18 @@ def cache_build_worker(
                         if ct is not None:
                             known_chunk_totals.append(int(ct))
                             completed_chunk_units[0] += float(ct)
+                        cstats = result.get("cache_stats")
+                        if isinstance(cstats, dict):
+                            skipped_n = int(cstats.get("chunks_skipped", 0) or 0)
+                            total_n = int(cstats.get("total_chunks", 0) or 0)
+                            if skipped_n > 0 and total_n > 0:
+                                problem_files.append({
+                                    "file": str(result.get("item_label", "")),
+                                    "skipped_chunks": skipped_n,
+                                    "total_chunks": total_n,
+                                    "skipped_percent": float(cstats.get("skipped_percent", 0.0) or 0.0),
+                                    "reasons": dict(cstats.get("skipped_by_reason", {})),
+                                })
                     elif status_val in ("skipped", "skipped_no_chunks"):
                         total_skipped += 1
                         cl = result.get("chunks_last", 0)
@@ -7161,6 +7891,7 @@ def cache_build_worker(
             "failed": total_failed,
             "total": total_items,
             "mode": cache_mode,
+            "problem_files": problem_files,
         }))
     except CancelledError:
         msgq.put(("cache_done", {
@@ -7168,6 +7899,7 @@ def cache_build_worker(
             "skipped": total_skipped,
             "total": total_items,
             "mode": cache_mode,
+            "problem_files": problem_files,
             "cancelled": True,
         }))
     except Exception:
@@ -7651,6 +8383,7 @@ class App(tk.Tk):
         self.use_editor_palette_var = tk.BooleanVar(value=False)
         self.ymin_var = tk.IntVar(value=0)
         self.ymax_var = tk.IntVar(value=320)
+        self.frame_label_mode_var = tk.StringVar(value="No label")
 
         # Output options
         self.output_name_var = tk.StringVar(value="")
@@ -7668,6 +8401,7 @@ class App(tk.Tk):
         # Advanced options (hidden by toggle)
         self.advanced_open = tk.BooleanVar(value=False)
         self.debug_blocks_var = tk.BooleanVar(value=False)
+        self.stop_on_bad_chunk_var = tk.BooleanVar(value=False)
         self.workers_var = tk.IntVar(value=3)
         self.fast_scan_var = tk.BooleanVar(value=False)
         self.aggressive_var = tk.BooleanVar(value=False)
@@ -7790,6 +8524,7 @@ class App(tk.Tk):
             self.use_editor_palette_var.set(bool(tl.get("use_editor_palette", self.use_editor_palette_var.get())))
             self.ymin_var.set(int(tl.get("y_min", self.ymin_var.get())))
             self.ymax_var.set(int(tl.get("y_max", self.ymax_var.get())))
+            self.frame_label_mode_var.set(str(tl.get("frame_label_mode", self.frame_label_mode_var.get())))
             self.output_name_var.set(str(tl.get("output_name", self.output_name_var.get())))
             self.keep_frames_var.set(bool(tl.get("keep_frames", self.keep_frames_var.get())))
             self.cache_mode_var.set(str(tl.get("cache_mode", self.cache_mode_var.get())))
@@ -7801,6 +8536,7 @@ class App(tk.Tk):
             self.fast_scan_var.set(False)
             self.aggressive_var.set(False)
             self.debug_blocks_var.set(bool(tl.get("debug_blocks", self.debug_blocks_var.get())))
+            self.stop_on_bad_chunk_var.set(bool(tl.get("stop_on_bad_chunk_data", self.stop_on_bad_chunk_var.get())))
 
             self.limit_enabled_var.set(bool(crop_cfg.get("enabled", self.limit_enabled_var.get())))
             self.auto_crop_90_var.set(bool(crop_cfg.get("auto_crop_90", self.auto_crop_90_var.get())))
@@ -7826,6 +8562,7 @@ class App(tk.Tk):
                 "hillshade_mode": str(self.hillshade_var.get()),
                 "y_min": int(self.ymin_var.get()),
                 "y_max": int(self.ymax_var.get()),
+                "frame_label_mode": str(self.frame_label_mode_var.get()),
                 "output_name": self.output_name_var.get(),
                 "keep_frames": bool(self.keep_frames_var.get()),
                 "cache_mode": self.cache_mode_var.get(),
@@ -7834,6 +8571,7 @@ class App(tk.Tk):
                 "cache_dim_end": bool(self.cache_dim_end_var.get()),
                 "auto_tune": True,
                 "debug_blocks": bool(self.debug_blocks_var.get()),
+                "stop_on_bad_chunk_data": bool(self.stop_on_bad_chunk_var.get()),
                 "use_editor_palette": bool(self.use_editor_palette_var.get()),
                 "crop": {
                     "enabled": bool(self.limit_enabled_var.get()),
@@ -7959,6 +8697,16 @@ class App(tk.Tk):
         ttk.Label(yrow, text="to").pack(side="left", padx=4)
         ttk.Entry(yrow, textvariable=self.ymax_var, width=6).pack(side="left")
 
+        ttk.Label(opts, text="Label Frames:").grid(row=3, column=0, sticky="w", **pad)
+        ttk.Combobox(
+            opts,
+            textvariable=self.frame_label_mode_var,
+            values=["No label", "Use Filename", "Extract Date from Backup"],
+            state="readonly",
+            style="ActiveReadonly.TCombobox",
+            width=24,
+        ).grid(row=3, column=1, sticky="w", **pad)
+
         ttk.Checkbutton(opts, text="Skip water (treat as transparent)", variable=self.skip_water_var).grid(row=2, column=2, columnspan=2, sticky="w", **pad)
         ttk.Label(opts, text="Hill shading:").grid(row=3, column=2, sticky="w", **pad)
         ttk.Combobox(opts, textvariable=self.hillshade_var, values=["none", "normal", "strong"], state="readonly", style="ActiveReadonly.TCombobox", width=12).grid(row=3, column=3, sticky="w", **pad)
@@ -8000,6 +8748,13 @@ class App(tk.Tk):
             variable=self.auto_crop_90_var,
         )
         self.auto_crop_cb.grid(row=1, column=0, columnspan=4, sticky="w", **pad)
+        self.preview_crop_btn = ttk.Button(
+            crop,
+            text="Preview occupancy and drag crop...",
+            command=self.on_open_cache_crop_preview,
+        )
+        self.preview_crop_btn.grid(row=1, column=4, columnspan=3, sticky="e", **pad)
+        self._manual_crop_widgets.append(self.preview_crop_btn)
         ttk.Label(
             crop,
             textvariable=self.auto_crop_result_var,
@@ -8100,6 +8855,11 @@ class App(tk.Tk):
         ttk.Checkbutton(self.adv_frame, text="Debug block IDs + unknowns", variable=self.debug_blocks_var).grid(row=2, column=0, columnspan=2, sticky="w", **pad)
         self.debug_btn = ttk.Button(self.adv_frame, text="Debug: render 1 chunk…", command=self.on_debug_one_chunk)
         self.debug_btn.grid(row=2, column=2, sticky="w", **pad)
+        ttk.Checkbutton(
+            self.adv_frame,
+            text="Stop cache building or rendering on bad chunk data",
+            variable=self.stop_on_bad_chunk_var,
+        ).grid(row=3, column=0, columnspan=2, sticky="w", **pad)
         self.preflight_btn = ttk.Button(self.adv_frame, text="Run preflight report…", command=self.on_run_preflight)
         self.preflight_btn.grid(row=3, column=2, sticky="w", **pad)
         # Log output (hidden in Advanced by default)
@@ -8286,6 +9046,99 @@ class App(tk.Tk):
             # "raw" — clear the warning and proceed with raw backups
             for s in conflicts:
                 s.warning = ""
+        return snapshots
+
+    def _prompt_surface_cache_y_mismatch(
+        self,
+        snapshots: List[SnapshotInput],
+        opt: RenderOptions,
+    ) -> Optional[List[SnapshotInput]]:
+        """Handle surface-cache Y mismatch with an adjust-vs-rescan prompt.
+
+        If a surface cache has top columns above requested ``opt.y_max``, asks
+        whether to raise Y max (use cache) or rescan from raw for affected items.
+        """
+        problems: List[Tuple[SnapshotInput, str, int, bool]] = []
+        requested_y_max = int(opt.y_max)
+
+        for snap in snapshots:
+            cache_path = ""
+            if is_cache_file(snap.path):
+                cache_path = snap.path
+            elif snap.cache_path and is_cache_file(snap.cache_path):
+                cache_path = snap.cache_path
+            if not cache_path:
+                continue
+
+            try:
+                header = read_cache_header(cache_path)
+            except Exception:
+                continue
+
+            if str(header.get("cache_mode", "")) != CACHE_MODE_SURFACE:
+                continue
+            if str(header.get("dimension", "")) != str(opt.dimension):
+                continue
+
+            cached_y_max = int(header.get("y_max", requested_y_max))
+            if requested_y_max >= cached_y_max:
+                continue
+
+            has_above, observed_max = _surface_cache_has_any_top_above(cache_path, requested_y_max)
+            if not has_above:
+                continue
+            observed_max = max(observed_max, _surface_cache_max_top_y(cache_path, requested_y_max))
+
+            raw_src = snap.raw_path or (snap.path if (not is_cache_file(snap.path)) else "")
+            can_rescan = bool(raw_src) and (is_world_archive_file(raw_src) or is_world_folder(raw_src))
+            problems.append((snap, cache_path, int(observed_max), can_rescan))
+
+        if not problems:
+            return snapshots
+
+        needed_y_max = max(p[2] for p in problems)
+        names = "\n".join(f"- {p[0].display_name} (max cached surface Y={p[2]})" for p in problems[:12])
+        more = ""
+        if len(problems) > 12:
+            more = f"\n- ... and {len(problems) - 12} more"
+
+        can_rescan_all = all(p[3] for p in problems)
+        msg = (
+            "Some surface caches contain top blocks above your current Y max.\n\n"
+            f"Current y_max: {requested_y_max}\n"
+            f"Minimum y_max needed to keep cache results: {needed_y_max}\n\n"
+            f"Affected snapshots:\n{names}{more}\n\n"
+            "Yes: raise Y max for this run and keep using caches.\n"
+            "No: rescan affected snapshots from raw sources with current Y settings.\n"
+            "Cancel: abort this run."
+        )
+
+        if can_rescan_all:
+            choice = messagebox.askyesnocancel("Surface Cache Y Mismatch", msg, parent=self)
+            if choice is None:
+                return None
+            if choice:
+                opt.y_max = int(needed_y_max)
+                self.ymax_var.set(int(opt.y_max))
+                return snapshots
+
+            for snap, _cache_path, _observed, _can_rescan in problems:
+                raw_src = snap.raw_path or (snap.path if (not is_cache_file(snap.path)) else "")
+                if not raw_src:
+                    continue
+                snap.path = raw_src
+                snap.kind = "zip" if os.path.isfile(raw_src) else "folder"
+                snap.raw_path = raw_src
+            return snapshots
+
+        messagebox.showwarning(
+            "Surface Cache Y Mismatch",
+            msg + "\n\nOne or more affected snapshots do not have a raw source available, so they cannot be rescanned. "
+                  "This run will use the raised Y max.",
+            parent=self,
+        )
+        opt.y_max = int(needed_y_max)
+        self.ymax_var.set(int(opt.y_max))
         return snapshots
 
     def _maybe_show_first_run_help(self) -> None:
@@ -9353,6 +10206,524 @@ class App(tk.Tk):
         else:
             self.single_custom_wh.grid_remove()
 
+    def on_open_cache_crop_preview(self):
+        folder = self.folder_var.get().strip()
+        if not folder or not os.path.isdir(folder):
+            messagebox.showerror("Missing input", "Select a backups/caches folder first.", parent=self)
+            return
+
+        dim_id = _timelapse_dimension_to_id(self.dimension_var.get())
+        prev_status1 = self.status1_var.get()
+        prev_status2 = self.status2_var.get()
+        self._set_status("Scanning cache occupancy...", "Reading chunk coordinates from cache files.")
+        self.update_idletasks()
+        try:
+            coords, cache_paths = collect_cache_chunk_occupancy(folder, dim_id)
+        except Exception as exc:
+            messagebox.showinfo(
+                "Preview unavailable",
+                f"Could not build a cache occupancy preview.\n\n{type(exc).__name__}: {exc}",
+                parent=self,
+            )
+            self._set_status(prev_status1, prev_status2)
+            return
+        self._set_status(prev_status1, prev_status2)
+
+        min_cx = min(cx for cx, _cz in coords)
+        max_cx = max(cx for cx, _cz in coords)
+        min_cz = min(cz for _cx, cz in coords)
+        max_cz = max(cz for _cx, cz in coords)
+        span_x = max(1, (max_cx - min_cx + 1))
+        span_z = max(1, (max_cz - min_cz + 1))
+
+        dlg = tk.Toplevel(self)
+        dlg.title("Cache occupancy preview (drag to crop)")
+        dlg.transient(self)
+        dlg.grab_set()
+
+        top_info = ttk.Label(
+            dlg,
+            text=(
+                f"Dimension: {dim_id} | caches: {len(cache_paths)} | occupied chunks: {len(coords)}\n"
+                "Use mouse wheel or Zoom +/- to zoom. Drag with right mouse to pan.\n"
+                "Left-drag selects crop (or pan when Pan mode is enabled), then click Apply crop."
+            ),
+            justify="left",
+        )
+        top_info.pack(anchor="w", padx=10, pady=(10, 6))
+
+        canvas_w = 820
+        canvas_h = 520
+        pad = 16
+        map_left = pad
+        map_top = pad
+        map_w = canvas_w - (pad * 2)
+        map_h = canvas_h - (pad * 2)
+
+        can = tk.Canvas(dlg, width=canvas_w, height=canvas_h, bg="#ffffff", highlightthickness=1, highlightbackground="#888888")
+        can.pack(fill="both", expand=True, padx=10)
+
+        denom_x = max(1, span_x - 1)
+        denom_z = max(1, span_z - 1)
+        points_norm: List[Tuple[float, float]] = []
+        for cx, cz in coords:
+            nx = float(int(cx) - min_cx) / float(denom_x)
+            ny = float(int(cz) - min_cz) / float(denom_z)
+            points_norm.append((nx, ny))
+
+        can.create_rectangle(
+            map_left,
+            map_top,
+            map_left + map_w,
+            map_top + map_h,
+            outline="#cccccc",
+            width=1,
+            tags=("frame",),
+        )
+
+        state: Dict[str, Any] = {
+            "start": None,
+            "pan_start": None,
+            "pan_view_start": None,
+            "rect": None,
+            "sel": None,
+            "valid": False,
+            "apply_btn": None,
+            "fit_all": True,
+            "view": {
+                "x": 0.0,
+                "y": 0.0,
+                "w": 1.0,
+                "h": 1.0,
+            },
+        }
+        _min_view_size = 1e-5
+
+        selection_var = tk.StringVar(value="No selection yet.")
+        sel_lbl = ttk.Label(dlg, textvariable=selection_var, justify="left")
+        sel_lbl.pack(anchor="w", padx=10, pady=(6, 2))
+        limit_var = tk.StringVar(value="")
+        limit_lbl = ttk.Label(dlg, textvariable=limit_var, justify="left", foreground="#b00020")
+        limit_lbl.pack(anchor="w", padx=10, pady=(0, 4))
+        viewport_var = tk.StringVar(value="")
+        vp_lbl = ttk.Label(dlg, textvariable=viewport_var, justify="left", foreground="#555555")
+        vp_lbl.pack(anchor="w", padx=10, pady=(0, 4))
+
+        controls = ttk.Frame(dlg)
+        controls.pack(fill="x", padx=10, pady=(0, 4))
+        pan_mode_var = tk.BooleanVar(value=False)
+
+        def _reset_selection() -> None:
+            state["start"] = None
+            state["sel"] = None
+            state["valid"] = False
+            if state.get("rect") is not None:
+                can.coords(state["rect"], 0, 0, 0, 0)
+
+        def _content_rect() -> Tuple[int, int, int, int]:
+            """Return aspect-correct drawable rectangle (letterboxed inside map frame)."""
+            if not bool(state.get("fit_all", True)):
+                return int(map_left), int(map_top), int(map_w), int(map_h)
+            v = state["view"]
+            world_w = max(1.0, float(v["w"]) * float(denom_x))
+            world_h = max(1.0, float(v["h"]) * float(denom_z))
+            data_aspect = world_w / world_h
+            canvas_aspect = float(map_w) / float(max(1, map_h))
+            if data_aspect >= canvas_aspect:
+                draw_w = int(map_w)
+                draw_h = max(1, int(round(float(draw_w) / max(1e-9, data_aspect))))
+                draw_x = int(map_left)
+                draw_y = int(map_top + (map_h - draw_h) // 2)
+            else:
+                draw_h = int(map_h)
+                draw_w = max(1, int(round(float(draw_h) * data_aspect)))
+                draw_x = int(map_left + (map_w - draw_w) // 2)
+                draw_y = int(map_top)
+            return draw_x, draw_y, draw_w, draw_h
+
+        def _clip_xy(x: int, y: int) -> Tuple[int, int]:
+            draw_x, draw_y, draw_w, draw_h = _content_rect()
+            cx = min(max(int(x), draw_x), draw_x + draw_w - 1)
+            cy = min(max(int(y), draw_y), draw_y + draw_h - 1)
+            return cx, cy
+
+        def _screen_to_norm(px: int, py: int) -> Tuple[float, float]:
+            draw_x, draw_y, draw_w, draw_h = _content_rect()
+            rel_x = min(max(0.0, float(px - draw_x) / float(max(1, draw_w - 1))), 1.0)
+            rel_y = min(max(0.0, float(py - draw_y) / float(max(1, draw_h - 1))), 1.0)
+            v = state["view"]
+            nx = float(v["x"]) + rel_x * float(v["w"])
+            ny = float(v["y"]) + rel_y * float(v["h"])
+            return nx, ny
+
+        def _norm_to_screen(nx: float, ny: float) -> Tuple[int, int]:
+            draw_x, draw_y, draw_w, draw_h = _content_rect()
+            v = state["view"]
+            rx = (float(nx) - float(v["x"])) / max(_min_view_size, float(v["w"]))
+            ry = (float(ny) - float(v["y"])) / max(_min_view_size, float(v["h"]))
+            sx = draw_x + int(round(rx * float(draw_w - 1)))
+            sy = draw_y + int(round(ry * float(draw_h - 1)))
+            return sx, sy
+
+        def _clamp_view() -> None:
+            v = state["view"]
+            vw = min(1.0, max(_min_view_size, float(v["w"])))
+            vh = min(1.0, max(_min_view_size, float(v["h"])))
+            vx = min(max(0.0, float(v["x"])), max(0.0, 1.0 - vw))
+            vy = min(max(0.0, float(v["y"])), max(0.0, 1.0 - vh))
+            v["w"], v["h"], v["x"], v["y"] = vw, vh, vx, vy
+
+        def _target_norm_ratio() -> float:
+            # Desired normalized viewport ratio (w/h) so world-space aspect
+            # matches the canvas when fit-all letterboxing is disabled.
+            canvas_aspect = float(map_w) / float(max(1, map_h))
+            return max(_min_view_size, canvas_aspect * (float(denom_z) / max(1.0, float(denom_x))))
+
+        def _enforce_fill_view_aspect(prefer: str = "w") -> None:
+            if bool(state.get("fit_all", True)):
+                return
+            v = state["view"]
+            ratio = _target_norm_ratio()
+            if prefer == "h":
+                v["w"] = max(_min_view_size, float(v["h"]) * ratio)
+            else:
+                v["h"] = max(_min_view_size, float(v["w"]) / ratio)
+
+            # Keep dimensions valid and within bounds while preserving ratio.
+            if float(v["w"]) > 1.0:
+                v["w"] = 1.0
+                v["h"] = max(_min_view_size, float(v["w"]) / ratio)
+            if float(v["h"]) > 1.0:
+                v["h"] = 1.0
+                v["w"] = max(_min_view_size, float(v["h"]) * ratio)
+            _clamp_view()
+
+        def _px_to_chunk(px: int, py: int) -> Tuple[int, int]:
+            nx, ny = _screen_to_norm(px, py)
+            cx = min_cx + int(round(nx * denom_x))
+            cz = min_cz + int(round(ny * denom_z))
+            cx = min(max(cx, min_cx), max_cx)
+            cz = min(max(cz, min_cz), max_cz)
+            return int(cx), int(cz)
+
+        def _effective_target_preset() -> str:
+            tgt = self.target_var.get().strip()
+            if tgt.lower().startswith("custom"):
+                return f"Custom ({int(self.custom_w_var.get())}x{int(self.custom_h_var.get())})"
+            return tgt
+
+        def _selection_metrics(sel: Tuple[int, int, int, int]) -> Dict[str, Any]:
+            x0, y0, x1, y1 = sel
+            c0x, c0z = _px_to_chunk(x0, y0)
+            c1x, c1z = _px_to_chunk(x1, y1)
+            cminx, cmaxx = min(c0x, c1x), max(c0x, c1x)
+            cminz, cmaxz = min(c0z, c1z), max(c0z, c1z)
+            xmin = int(cminx * 16)
+            xmax = int((cmaxx + 1) * 16 - 1)
+            zmin = int(cminz * 16)
+            zmax = int((cmaxz + 1) * 16 - 1)
+            width_blocks = max(1, xmax - xmin + 1)
+            height_blocks = max(1, zmax - zmin + 1)
+            target = parse_target_preset(_effective_target_preset())
+            bpp = compute_blocks_per_pixel(width_blocks, height_blocks, target)
+            w_px = int(np.ceil(width_blocks / bpp))
+            h_px = int(np.ceil(height_blocks / bpp))
+            px_count = max(0, int(w_px)) * max(0, int(h_px))
+            rgb_gib = (float(px_count) * 3.0) / float(1024 ** 3)
+            problems: List[str] = []
+            if int(w_px) > _RENDER_GIF_MAX_DIM or int(h_px) > _RENDER_GIF_MAX_DIM:
+                problems.append(f"frame {w_px}x{h_px}px exceeds {_RENDER_GIF_MAX_DIM}px per-side limit")
+            if rgb_gib > _MAX_RGB_BUFFER_GIB:
+                problems.append(f"estimated RGB buffer {rgb_gib:.2f} GiB exceeds {_MAX_RGB_BUFFER_GIB:.1f} GiB")
+            return {
+                "cminx": cminx,
+                "cmaxx": cmaxx,
+                "cminz": cminz,
+                "cmaxz": cmaxz,
+                "xmin": xmin,
+                "xmax": xmax,
+                "zmin": zmin,
+                "zmax": zmax,
+                "w_px": w_px,
+                "h_px": h_px,
+                "bpp": bpp,
+                "valid": len(problems) == 0,
+                "problems": problems,
+            }
+
+        def _update_selection_text() -> None:
+            sel = state.get("sel")
+            if not sel:
+                selection_var.set("No selection yet.")
+                limit_var.set("")
+                state["valid"] = False
+                apply_btn_obj = state.get("apply_btn")
+                if apply_btn_obj is not None:
+                    try:
+                        apply_btn_obj.configure(state="disabled")
+                    except Exception:
+                        pass
+                return
+            m = _selection_metrics(sel)
+            selection_var.set(
+                f"Selected chunks: X=[{m['cminx']},{m['cmaxx']}] Z=[{m['cminz']},{m['cmaxz']}] | "
+                f"Blocks: X=[{m['xmin']},{m['xmax']}] Z=[{m['zmin']},{m['zmax']}] | "
+                f"Est frame: {m['w_px']}x{m['h_px']} px (bpp={m['bpp']})"
+            )
+            state["valid"] = bool(m["valid"])
+            if state.get("rect") is not None:
+                can.itemconfigure(state["rect"], outline=("#1f6feb" if m["valid"] else "#c62828"))
+            apply_btn_obj = state.get("apply_btn")
+            if m["valid"]:
+                limit_var.set("")
+                if apply_btn_obj is not None:
+                    try:
+                        apply_btn_obj.configure(state="normal")
+                    except Exception:
+                        pass
+            else:
+                limit_var.set("Area too large! " + "; ".join(m["problems"]))
+                if apply_btn_obj is not None:
+                    try:
+                        apply_btn_obj.configure(state="disabled")
+                    except Exception:
+                        pass
+
+        def _redraw_preview() -> None:
+            _clamp_view()
+            can.delete("occ")
+            can.delete("viewinfo")
+            can.delete("innerframe")
+            v = state["view"]
+            vx0 = float(v["x"])
+            vy0 = float(v["y"])
+            vx1 = vx0 + float(v["w"])
+            vy1 = vy0 + float(v["h"])
+            draw_x, draw_y, draw_w, draw_h = _content_rect()
+
+            can.create_rectangle(
+                draw_x,
+                draw_y,
+                draw_x + draw_w,
+                draw_y + draw_h,
+                outline="#c7c7c7",
+                width=1,
+                tags=("innerframe",),
+            )
+
+            occupied_px: set = set()
+            vw = max(_min_view_size, float(v["w"]))
+            vh = max(_min_view_size, float(v["h"]))
+            for nx, ny in points_norm:
+                if nx < vx0 or nx > vx1 or ny < vy0 or ny > vy1:
+                    continue
+                rx = (nx - vx0) / vw
+                ry = (ny - vy0) / vh
+                sx = draw_x + int(rx * (draw_w - 1))
+                sy = draw_y + int(ry * (draw_h - 1))
+                occupied_px.add((sx, sy))
+
+            for sx, sy in occupied_px:
+                can.create_rectangle(sx, sy, sx + 1, sy + 1, outline="#2d5f8b", fill="#2d5f8b", tags=("occ",))
+
+            c_tl = _px_to_chunk(draw_x, draw_y)
+            c_br = _px_to_chunk(draw_x + draw_w - 1, draw_y + draw_h - 1)
+            can.create_text(
+                draw_x + 4,
+                draw_y + 4,
+                anchor="nw",
+                text=f"View NW chunk ({c_tl[0]},{c_tl[1]})",
+                fill="#333333",
+                tags=("viewinfo",),
+            )
+            can.create_text(
+                draw_x + draw_w - 4,
+                draw_y + draw_h - 4,
+                anchor="se",
+                text=f"View SE chunk ({c_br[0]},{c_br[1]})",
+                fill="#333333",
+                tags=("viewinfo",),
+            )
+            viewport_var.set(
+                f"Zoom: {(1.0 / max(_min_view_size, float(v['w']))):.1f}x | "
+                f"Mode: {'fit-all' if bool(state.get('fit_all', True)) else 'fill-view'} | "
+                f"Visible chunks: X=[{c_tl[0]},{c_br[0]}], Z=[{c_tl[1]},{c_br[1]}]"
+            )
+
+        def _zoom_at(factor: float, px: int, py: int) -> None:
+            x, y = _clip_xy(px, py)
+            nx, ny = _screen_to_norm(x, y)
+            draw_x, draw_y, draw_w, draw_h = _content_rect()
+            v = state["view"]
+            old_w = float(v["w"])
+            old_h = float(v["h"])
+            new_w = min(1.0, max(_min_view_size, old_w / max(0.01, float(factor))))
+            new_h = min(1.0, max(_min_view_size, old_h / max(0.01, float(factor))))
+
+            rel_x = min(max(0.0, float(x - draw_x) / float(max(1, draw_w - 1))), 1.0)
+            rel_y = min(max(0.0, float(y - draw_y) / float(max(1, draw_h - 1))), 1.0)
+            state["fit_all"] = False
+            v["w"] = new_w
+            v["h"] = new_h
+            _enforce_fill_view_aspect(prefer="w")
+            v["x"] = float(nx) - rel_x * float(v["w"])
+            v["y"] = float(ny) - rel_y * float(v["h"])
+            _clamp_view()
+            _reset_selection()
+            _redraw_preview()
+            _update_selection_text()
+
+        def _start_pan(event: Any) -> None:
+            x, y = _clip_xy(event.x, event.y)
+            state["pan_start"] = (x, y)
+            v = state["view"]
+            state["pan_view_start"] = (float(v["x"]), float(v["y"]))
+
+        def _pan_move(event: Any) -> None:
+            if state.get("pan_start") is None or state.get("pan_view_start") is None:
+                return
+            x, y = _clip_xy(event.x, event.y)
+            sx, sy = state["pan_start"]
+            vx0, vy0 = state["pan_view_start"]
+            dx = float(x - sx)
+            dy = float(y - sy)
+            draw_x, draw_y, draw_w, draw_h = _content_rect()
+            v = state["view"]
+            v["x"] = float(vx0) - (dx / float(max(1, draw_w - 1))) * float(v["w"])
+            v["y"] = float(vy0) - (dy / float(max(1, draw_h - 1))) * float(v["h"])
+            _clamp_view()
+            _reset_selection()
+            _redraw_preview()
+            _update_selection_text()
+
+        def _end_pan(_event: Any) -> None:
+            state["pan_start"] = None
+            state["pan_view_start"] = None
+
+        def _start_drag(event: Any) -> None:
+            if bool(pan_mode_var.get()):
+                _start_pan(event)
+                return
+            x, y = _clip_xy(event.x, event.y)
+            state["start"] = (x, y)
+            if state.get("rect") is None:
+                state["rect"] = can.create_rectangle(x, y, x, y, outline="#1f6feb", width=2, dash=(4, 2))
+            else:
+                can.coords(state["rect"], x, y, x, y)
+            state["sel"] = (x, y, x, y)
+            _update_selection_text()
+
+        def _drag(event: Any) -> None:
+            if bool(pan_mode_var.get()):
+                _pan_move(event)
+                return
+            if state.get("start") is None:
+                return
+            sx, sy = state["start"]
+            x, y = _clip_xy(event.x, event.y)
+            x0, x1 = min(sx, x), max(sx, x)
+            y0, y1 = min(sy, y), max(sy, y)
+            state["sel"] = (x0, y0, x1, y1)
+            if state.get("rect") is not None:
+                can.coords(state["rect"], x0, y0, x1, y1)
+            _update_selection_text()
+
+        def _end_drag(event: Any) -> None:
+            if bool(pan_mode_var.get()):
+                _end_pan(event)
+                return
+            _drag(event)
+            state["start"] = None
+
+        def _mousewheel(event: Any) -> None:
+            delta = int(getattr(event, "delta", 0))
+            if delta == 0:
+                return
+            if delta > 0:
+                _zoom_at(1.25, event.x, event.y)
+            else:
+                _zoom_at(0.8, event.x, event.y)
+
+        def _zoom_in() -> None:
+            _zoom_at(1.25, map_left + map_w // 2, map_top + map_h // 2)
+
+        def _zoom_out() -> None:
+            _zoom_at(0.8, map_left + map_w // 2, map_top + map_h // 2)
+
+        def _zoom_reset() -> None:
+            v = state["view"]
+            v["x"], v["y"], v["w"], v["h"] = 0.0, 0.0, 1.0, 1.0
+            state["fit_all"] = True
+            _reset_selection()
+            _redraw_preview()
+            _update_selection_text()
+
+        def _zoom_fill_view() -> None:
+            state["fit_all"] = False
+            _enforce_fill_view_aspect(prefer="w")
+            _reset_selection()
+            _redraw_preview()
+            _update_selection_text()
+
+        can.bind("<ButtonPress-1>", _start_drag)
+        can.bind("<B1-Motion>", _drag)
+        can.bind("<ButtonRelease-1>", _end_drag)
+        can.bind("<ButtonPress-3>", _start_pan)
+        can.bind("<B3-Motion>", _pan_move)
+        can.bind("<ButtonRelease-3>", _end_pan)
+        can.bind("<MouseWheel>", _mousewheel)
+        can.bind("<Button-4>", lambda e: _zoom_at(1.25, e.x, e.y))
+        can.bind("<Button-5>", lambda e: _zoom_at(0.8, e.x, e.y))
+
+        ttk.Button(controls, text="Zoom +", command=_zoom_in).pack(side="left")
+        ttk.Button(controls, text="Zoom -", command=_zoom_out).pack(side="left", padx=(6, 0))
+        ttk.Button(controls, text="Fill view", command=_zoom_fill_view).pack(side="left", padx=(6, 0))
+        ttk.Button(controls, text="Reset view", command=_zoom_reset).pack(side="left", padx=(6, 0))
+        ttk.Checkbutton(controls, text="Pan mode", variable=pan_mode_var).pack(side="left", padx=(14, 0))
+
+        btns = ttk.Frame(dlg)
+        btns.pack(fill="x", padx=10, pady=(6, 10))
+
+        def _clear_selection() -> None:
+            _reset_selection()
+            _update_selection_text()
+
+        def _apply_selection() -> None:
+            sel = state.get("sel")
+            if not sel:
+                messagebox.showwarning("No selection", "Drag a rectangle on the preview first.", parent=dlg)
+                return
+            m = _selection_metrics(sel)
+            if not bool(m["valid"]):
+                messagebox.showerror("Area too large", "Area too large! Shrink the selection and try again.", parent=dlg)
+                return
+
+            self.auto_crop_90_var.set(False)
+            self.limit_enabled_var.set(True)
+            self.xmin_var.set(int(m["xmin"]))
+            self.xmax_var.set(int(m["xmax"]))
+            self.zmin_var.set(int(m["zmin"]))
+            self.zmax_var.set(int(m["zmax"]))
+            self.auto_crop_result_var.set(
+                f"Manual crop set from preview: X=[{self.xmin_var.get()},{self.xmax_var.get()}], "
+                f"Z=[{self.zmin_var.get()},{self.zmax_var.get()}]"
+            )
+            self._sync_manual_crop_controls()
+            self._sync_cache_controls_for_crop()
+            self._persist_ui_settings()
+            dlg.destroy()
+
+        ttk.Button(btns, text="Clear selection", command=_clear_selection).pack(side="left")
+        apply_btn = ttk.Button(btns, text="Apply crop", command=_apply_selection, state="disabled")
+        apply_btn.pack(side="right")
+        state["apply_btn"] = apply_btn
+        ttk.Button(btns, text="Cancel", command=dlg.destroy).pack(side="right", padx=(0, 8))
+
+        _redraw_preview()
+        _update_selection_text()
+
+        dlg.wait_window()
+
     def on_cache_mode_help(self):
         messagebox.showinfo(
             "Output cache mode",
@@ -9418,8 +10789,12 @@ class App(tk.Tk):
 
     def pick_single_zip(self):
         f = filedialog.askopenfilename(
-            title="Select a world backup ZIP or .wmtt4mc cache",
-            filetypes=[("Snapshot sources", "*.zip *.wmtt4mc"), ("ZIP files", "*.zip"), ("Cache files", "*.wmtt4mc")],
+            title="Select a world backup archive (.zip/.mcworld) or .wmtt4mc cache",
+            filetypes=[
+                ("Snapshot sources", "*.zip *.mcworld *.wmtt4mc"),
+                ("World archives", "*.zip *.mcworld"),
+                ("Cache files", "*.wmtt4mc"),
+            ],
         )
         if f:
             self.single_zip_var.set(f)
@@ -9640,6 +11015,7 @@ class App(tk.Tk):
         opt.y_max = int(self.ymax_var.get())
         opt.skip_water = bool(self.skip_water_var.get())
         opt.hillshade_mode = str(self.hillshade_var.get())
+        opt.frame_label_mode = str(self.frame_label_mode_var.get())
         # Target preset
         tgt = self.target_var.get()
         if tgt.strip().lower().startswith("custom"):
@@ -9653,6 +11029,7 @@ class App(tk.Tk):
         opt.fast_scan = False
         opt.aggressive_mode = False
         opt.debug_block_samples = bool(self.debug_blocks_var.get())
+        opt.stop_on_bad_chunk_data = bool(self.stop_on_bad_chunk_var.get())
 
         opt.auto_crop_90 = bool(self.auto_crop_90_var.get())
         opt.limit_enabled = bool(self.limit_enabled_var.get()) and (not opt.auto_crop_90)
@@ -9696,10 +11073,19 @@ class App(tk.Tk):
         folder = self.folder_var.get().strip()
         out_dir = self.out_var.get().strip()
         snapshots = find_snapshot_sources(folder, dimension=_timelapse_dimension_to_id(self.dimension_var.get()))  # always includes caches, ZIPs, and world folders
+        opt = self._gather_options()
+        original_y_max = int(opt.y_max)
         snapshots = self._prompt_cache_conflicts(snapshots)
         if snapshots is None:
             return
-        opt = self._gather_options()
+        snapshots = self._prompt_surface_cache_y_mismatch(snapshots, opt)
+        if snapshots is None:
+            return
+
+        # Re-sync in-memory run options from UI state after prompts that may
+        # update controls (e.g. surface-cache Y mismatch auto-adjust).
+        opt.y_min = int(self.ymin_var.get())
+        opt.y_max = int(self.ymax_var.get())
 
         self._persist_ui_settings()
 
@@ -9714,6 +11100,11 @@ class App(tk.Tk):
         self._set_progress(0.0)
         self._set_status("Starting…", "")
         self._log("-" * 60, "timelapse")
+        if int(opt.y_max) != original_y_max:
+            self._log(
+                f"[Y ADJUST] Using y_max={int(opt.y_max)} for this run (was {original_y_max}) to reuse compatible caches.",
+                "timelapse",
+            )
         
         # Show cache discovery diagnostics
         self._log(f"Snapshots: {len(snapshots)} (processing newest → oldest)", "timelapse")
@@ -9905,6 +11296,7 @@ class App(tk.Tk):
                 selected_dims,
                 int(self.ymin_var.get()),
                 int(self.ymax_var.get()),
+                bool(self.stop_on_bad_chunk_var.get()),
                 self.msgq,
                 self.cancel_event,
             )
@@ -9930,6 +11322,7 @@ class App(tk.Tk):
         opt.y_max = int(self.single_ymax_var.get())
         opt.skip_water = bool(self.single_skip_water_var.get())
         opt.hillshade_mode = str(self.single_hillshade_var.get())
+        opt.stop_on_bad_chunk_data = bool(self.stop_on_bad_chunk_var.get())
 
         tgt = self.single_target_var.get()
         if tgt.strip().lower().startswith("custom"):
@@ -9988,15 +11381,15 @@ class App(tk.Tk):
             return
         zips = find_zip_backups(folder)
         if not zips:
-            messagebox.showerror("Missing input", "No ZIP files found.")
+            messagebox.showerror("Missing input", "No world archive files found (.zip/.mcworld).")
             return
 
         # Pick newest by default
         default_zip = zips[0]
         # Let user pick a zip from list via file picker starting in folder
-        chosen = filedialog.askopenfilename(title="Select a backup ZIP to debug",
+        chosen = filedialog.askopenfilename(title="Select a backup archive (.zip/.mcworld) to debug",
                                             initialdir=folder,
-                                            filetypes=[("ZIP files", "*.zip")])
+                            filetypes=[("World archives", "*.zip *.mcworld")])
         if chosen:
             zip_path = chosen
         else:
@@ -10012,7 +11405,7 @@ class App(tk.Tk):
         self._set_busy(True)
         self._set_progress(0.0)
         self._set_status("Debugging…", "Rendering one chunk PNG + debug IDs.")
-        self._log(f"Debug ZIP: {zip_path}", "timelapse")
+        self._log(f"Debug archive: {zip_path}", "timelapse")
 
         def dbg_runner():
             debug_one_chunk_worker(zip_path, out_dir, opt, self.msgq, self.cancel_event)
@@ -10109,17 +11502,29 @@ class App(tk.Tk):
                 elif kind == "cache_done":
                     self._set_busy(False)
                     self.current_task = None
+                    problem_files = payload.get("problem_files", []) if isinstance(payload.get("problem_files", []), list) else []
                     if payload.get("cancelled"):
                         self._set_status("Cache build cancelled.", "")
                     else:
-                        self._set_status(
-                            "Cache build finished.",
-                            f"Built {payload.get('built', 0)}, skipped {payload.get('skipped', 0)}, failed {payload.get('failed', 0)}"
-                        )
+                        status_line2 = f"Built {payload.get('built', 0)}, skipped {payload.get('skipped', 0)}, failed {payload.get('failed', 0)}"
+                        if problem_files:
+                            status_line2 += f" | {len(problem_files)} file(s) had skipped bad chunks"
+                        self._set_status("Cache build finished.", status_line2)
                         self._log(
                             f"Cache build complete: built={payload.get('built', 0)} skipped={payload.get('skipped', 0)} failed={payload.get('failed', 0)} total={payload.get('total', 0)} mode={payload.get('mode', '')}",
                             "timelapse",
                         )
+                        for pf in problem_files:
+                            fname = str(pf.get("file", "")).strip() or "(unknown)"
+                            pct = float(pf.get("skipped_percent", 0.0) or 0.0)
+                            self._log(
+                                f"File '{fname}' had {pct:.1f}% bad chunk data that had to be skipped.",
+                                "timelapse",
+                            )
+                            reasons = pf.get("reasons", {}) if isinstance(pf.get("reasons", {}), dict) else {}
+                            if reasons:
+                                parts = [f"{str(k)}={int(v)}" for k, v in sorted(reasons.items(), key=lambda kv: str(kv[0]))]
+                                self._log(f"  skip reasons: {', '.join(parts)}", "timelapse")
                 elif kind == "done_preflight":
                     self._set_busy(False)
                     self.current_task = None
