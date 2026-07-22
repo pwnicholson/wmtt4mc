@@ -1200,6 +1200,171 @@ def build_palette_lookup(palette_dict):
         key_to_idx[k] = i
     return key_to_idx, color_table
 
+
+WIKI_BASE_COLORS = {
+    "none": (0, 0, 0),
+    "grass": (127, 178, 56),
+    "sand": (247, 233, 163),
+    "wool": (199, 199, 199),
+    "fire": (255, 0, 0),
+    "ice": (160, 160, 255),
+    "metal": (167, 167, 167),
+    "plant": (0, 124, 0),
+    "snow": (255, 255, 255),
+    "clay": (164, 168, 184),
+    "dirt": (151, 109, 77),
+    "stone": (112, 112, 112),
+    "water": (64, 64, 255),
+    "wood": (143, 119, 72),
+    "quartz": (255, 252, 245),
+    "orange": (216, 127, 51),
+    "magenta": (178, 76, 216),
+    "light_blue": (102, 153, 216),
+    "yellow": (229, 229, 51),
+    "light_green": (127, 204, 25),
+    "pink": (242, 127, 165),
+    "gray": (76, 76, 76),
+    "light_gray": (153, 153, 153),
+    "cyan": (76, 127, 153),
+    "purple": (127, 63, 178),
+    "blue": (51, 76, 178),
+    "brown": (102, 76, 51),
+    "green": (102, 127, 51),
+    "red": (153, 51, 51),
+    "black": (25, 25, 25),
+    "podzol": (129, 86, 49),
+    "nether": (112, 2, 0),
+    "terracotta_white": (209, 177, 161),
+    "terracotta_orange": (159, 82, 36),
+    "terracotta_magenta": (149, 87, 108),
+    "terracotta_light_blue": (112, 108, 138),
+    "terracotta_yellow": (186, 133, 36),
+    "terracotta_light_green": (103, 117, 53),
+    "terracotta_pink": (160, 77, 78),
+    "terracotta_gray": (57, 41, 35),
+    "terracotta_light_gray": (135, 107, 98),
+    "terracotta_cyan": (87, 92, 92),
+    "terracotta_purple": (122, 73, 88),
+    "terracotta_blue": (76, 62, 92),
+    "terracotta_brown": (76, 50, 35),
+    "terracotta_green": (76, 82, 42),
+    "terracotta_red": (142, 60, 46),
+    "terracotta_black": (37, 22, 16),
+    "crimson_nylium": (189, 48, 49),
+    "crimson_stem": (148, 63, 97),
+    "crimson_hyphae": (92, 25, 29),
+    "warped_nylium": (22, 126, 134),
+    "warped_stem": (58, 142, 140),
+    "warped_hyphae": (86, 44, 62),
+    "warped_wart_block": (20, 180, 133),
+    "deepslate": (100, 100, 100),
+    "raw_iron": (216, 175, 147),
+    "glow_lichen": (127, 167, 150),
+}
+
+
+def _wiki_base_color_for_block_id(block_id: str) -> Optional[Tuple[int, int, int]]:
+    """Return the official base color for a block id using the Minecraft map base-color table."""
+    if not block_id:
+        return None
+
+    bid = str(block_id).strip().lower()
+    bid = bid.split("[", 1)[0].split("{", 1)[0]
+    if not bid.startswith("minecraft:"):
+        return None
+
+    if any(token in bid for token in ("air", "cave_air", "void_air", "barrier", "structure_void", "light_block", "pink_petals")):
+        return WIKI_BASE_COLORS["none"]
+    if any(token in bid for token in ("lava", "tnt", "fire", "redstone_block")):
+        return WIKI_BASE_COLORS["fire"]
+    if any(token in bid for token in ("ice", "packed_ice", "blue_ice", "frosted_ice")):
+        return WIKI_BASE_COLORS["ice"]
+    if any(token in bid for token in ("brewing_stand", "heavy_weighted_pressure_plate", "iron_trapdoor", "lantern", "anvil", "grindstone", "lodestone", "copper_trapdoor")):
+        return WIKI_BASE_COLORS["metal"]
+    if any(token in bid for token in ("grass_block", "short_grass", "tall_grass", "fern", "large_fern", "grass")):
+        return WIKI_BASE_COLORS["grass"]
+    if "cherry_leaves" in bid or "cherry" in bid and "leaves" in bid:
+        return WIKI_BASE_COLORS["pink"]
+    if any(token in bid for token in ("sapling", "flower", "wheat", "sugar_cane", "pumpkin_stem", "melon_stem", "lily_pad", "cocoa", "carrot", "potato", "beetroot", "sweet_berry_bush", "cactus", "bamboo", "cave_vines", "rose_bush", "sunflower", "leaves")):
+        return WIKI_BASE_COLORS["plant"]
+    if any(token in bid for token in ("snow", "powder_snow", "white_", "white", "_white")):
+        return WIKI_BASE_COLORS["snow"]
+    if any(token in bid for token in ("clay", "infested", "heavy_core")):
+        return WIKI_BASE_COLORS["clay"]
+    if any(token in bid for token in ("sand", "suspicious_sand", "sandstone", "red_sand", "red_sandstone")):
+        return WIKI_BASE_COLORS["sand"]
+    if any(token in bid for token in ("dirt", "farmland", "rooted_dirt", "hanging_roots", "packed_mud", "granite", "jukebox", "brown_mushroom_block")):
+        return WIKI_BASE_COLORS["dirt"]
+    if any(token in bid for token in ("stone", "andesite", "cobblestone", "bedrock", "mossy_cobblestone", "monster_spawner", "redstone_ore", "stone_bricks", "ender_chest", "dropper", "observer", "smoker", "blast_furnace", "stonecutter", "piston", "gravel", "cauldron", "coal_ore", "iron_ore", "gold_ore", "lapis_ore", "diamond_ore", "emerald_ore", "copper_ore")):
+        if "deepslate" in bid:
+            return WIKI_BASE_COLORS["deepslate"]
+        return WIKI_BASE_COLORS["stone"]
+    if "deepslate" in bid:
+        return WIKI_BASE_COLORS["deepslate"]
+    if any(token in bid for token in ("water", "kelp", "seagrass", "bubble_column")):
+        return WIKI_BASE_COLORS["water"]
+    if any(token in bid for token in ("acacia", "red_sand", "red_sandstone", "orange", "pumpkin", "terracotta", "honey", "copper")):
+        return WIKI_BASE_COLORS["orange"]
+    if any(token in bid for token in ("oak", "dark_oak", "spruce", "mangrove", "crimson", "warped", "birch", "pale_oak", "quartz", "diorite")):
+        if "spruce" in bid and any(token in bid for token in ("log", "planks", "door", "trapdoor", "slab", "stairs", "fence", "sign", "pressure_plate", "wood", "stripped_")):
+            return WIKI_BASE_COLORS["podzol"]
+        if "birch" in bid and any(token in bid for token in ("log", "planks", "door", "trapdoor", "slab", "stairs", "fence", "sign", "pressure_plate", "wood", "stripped_")):
+            return WIKI_BASE_COLORS["quartz"]
+        if "pale_oak" in bid and any(token in bid for token in ("log", "planks", "door", "trapdoor", "slab", "stairs", "fence", "sign", "pressure_plate", "wood", "stripped_")):
+            return WIKI_BASE_COLORS["quartz"]
+        if "dark_oak" in bid and any(token in bid for token in ("log", "planks", "door", "trapdoor", "slab", "stairs", "fence", "sign", "pressure_plate", "wood", "stripped_")):
+            return WIKI_BASE_COLORS["brown"]
+        if "mangrove" in bid and any(token in bid for token in ("log", "planks", "door", "trapdoor", "slab", "stairs", "fence", "sign", "pressure_plate", "wood", "stripped_")):
+            return WIKI_BASE_COLORS["red"]
+        if "jungle" in bid and any(token in bid for token in ("log", "planks", "door", "trapdoor", "slab", "stairs", "fence", "sign", "pressure_plate", "wood", "stripped_")):
+            return WIKI_BASE_COLORS["dirt"]
+        if any(token in bid for token in ("log", "planks", "door", "trapdoor", "slab", "stairs", "fence", "sign", "pressure_plate", "wood", "stripped_")):
+            return WIKI_BASE_COLORS["wood"]
+    if any(token in bid for token in ("quartz", "diorite")):
+        return WIKI_BASE_COLORS["quartz"]
+    if any(token in bid for token in ("terracotta", "honey", "copper")):
+        return WIKI_BASE_COLORS["orange"]
+    if any(token in bid for token in ("magenta", "purpur")):
+        return WIKI_BASE_COLORS["magenta"]
+    if any(token in bid for token in ("light_blue", "soul_fire")):
+        return WIKI_BASE_COLORS["light_blue"]
+    if any(token in bid for token in ("yellow", "sponge", "hay_block", "horn_coral")):
+        return WIKI_BASE_COLORS["yellow"]
+    if any(token in bid for token in ("lime", "melon")):
+        return WIKI_BASE_COLORS["light_green"]
+    if any(token in bid for token in ("pink", "cherry", "brain_coral", "pearlescent_froglight", "cactus_flower")):
+        return WIKI_BASE_COLORS["pink"]
+    if any(token in bid for token in ("gray", "dead_coral", "tinted_glass", "dried_ghast")):
+        return WIKI_BASE_COLORS["gray"]
+    if any(token in bid for token in ("light_gray", "pale_moss", "structure_block", "jigsaw", "exposed_copper", "mud_bricks")):
+        return WIKI_BASE_COLORS["light_gray"]
+    if any(token in bid for token in ("cyan", "prismarine", "warped", "twisting_vines", "nether_sprouts", "sculk", "calibrated_sculk_sensor")):
+        return WIKI_BASE_COLORS["cyan"]
+    if any(token in bid for token in ("purple", "mycelium", "chorus", "bubble_coral", "amethyst")):
+        return WIKI_BASE_COLORS["purple"]
+    if any(token in bid for token in ("blue", "tube_coral")):
+        return WIKI_BASE_COLORS["blue"]
+    if any(token in bid for token in ("green", "moss", "chain_command_block", "sea_pickle", "dried_kelp")):
+        return WIKI_BASE_COLORS["green"]
+    if any(token in bid for token in ("brown", "soul_sand", "command_block", "brown_mushroom", "leaf_litter")):
+        return WIKI_BASE_COLORS["brown"]
+    if any(token in bid for token in ("red", "nether_wart", "shroomlight", "mangrove")):
+        return WIKI_BASE_COLORS["red"]
+    if any(token in bid for token in ("black", "obsidian", "coal", "basalt", "blackstone", "ancient_debris", "crying_obsidian", "sculk", "netherite", "dragon_egg")):
+        return WIKI_BASE_COLORS["black"]
+    if any(token in bid for token in ("nether", "netherrack", "crimson", "warped", "magma")):
+        return WIKI_BASE_COLORS["nether"]
+    return None
+
+
+def _apply_wiki_base_colors_to_palette(palette: Dict[str, Tuple[int, int, int]]) -> None:
+    """Overwrite block colors in a palette with the official Minecraft map base colors where appropriate."""
+    for key in list(palette.keys()):
+        wiki_rgb = _wiki_base_color_for_block_id(key)
+        if wiki_rgb is not None:
+            palette[key] = wiki_rgb
+
+
 PALETTE = {
     'minecraft:acacia_door_bottom': (199, 178, 85),
     'minecraft:acacia_door_top': (199, 178, 85),
@@ -1375,7 +1540,7 @@ PALETTE = {
     'minecraft:chain_command_block_side': (131, 161, 147),
     'minecraft:cherry_door_bottom': (199, 178, 85),
     'minecraft:cherry_door_top': (199, 178, 85),
-    'minecraft:cherry_leaves': (229, 173, 194),
+    'minecraft:cherry_leaves': (242, 127, 165),
     'minecraft:cherry_log': (55, 33, 44),
     'minecraft:cherry_log_top': (185, 141, 137),
     'minecraft:cherry_planks': (227, 179, 173),
@@ -2336,7 +2501,14 @@ PALETTE = {
     'minecraft:yellow_stained_glass_pane_top': (221, 221, 49),
     'minecraft:yellow_terracotta': (186, 133, 35),
     'minecraft:yellow_wool': (249, 198, 40),
+    'minecraft:yellow_banner': (249, 198, 40),
+    'minecraft:white_banner': (235, 235, 235),
+    'minecraft:black_banner': (30, 30, 30),
+    'minecraft:polished_sulfur': (232, 196, 52),
+    'minecraft:polished_sulfur_wall': (220, 180, 48),
+    'minecraft:polished_cinnabar_wall': (190, 55, 55),
 }
+_apply_wiki_base_colors_to_palette(PALETTE)
 # Always build palette lookup tables at module load to avoid NameError in subprocesses
 PALETTE_KEY_TO_IDX, PALETTE_COLOR_TABLE = build_palette_lookup(PALETTE)
 
@@ -2477,7 +2649,7 @@ VARIANT_PALETTE = {
     "minecraft:leaves|acacia": (95, 155, 60),
     "minecraft:leaves|dark_oak": (55, 105, 45),
     "minecraft:leaves|mangrove": (85, 135, 70),
-    "minecraft:leaves|cherry": (214, 148, 176),
+    "minecraft:leaves|cherry": (242, 127, 165),
     "minecraft:leaves|bamboo": (100, 170, 70),
     "minecraft:leaves|crimson": (150, 60, 80),
     "minecraft:leaves|warped": (60, 170, 160),
@@ -2594,6 +2766,7 @@ class RenderOptions:
     debug_block_samples: bool = False
     debug_log_unknowns: bool = True
     stop_on_bad_chunk_data: bool = False
+    debug_raw_ids: bool = False
 
     # Output options
     output_name: str = ""
@@ -3039,7 +3212,7 @@ def classify_block(block, extra_palette: Optional[Dict[str, Tuple[int, int, int]
         return (160, 160, 160), report_key, True, "rail"
 
     wood_type = None
-    for k in ("wood_type", "wood", "material", "type", "tree_type"):
+    for k in ("wood_type", "wood", "material", "leaves", "tree_type", "leaf_type", "log_type", "type"):
         if k in props:
             wood_type = props[k].strip().lower()
             break
@@ -3052,18 +3225,18 @@ def classify_block(block, extra_palette: Optional[Dict[str, Tuple[int, int, int]
 
     # Variant-aware wood/leaves coloring
     if wood_type:
-        if bid == "minecraft:leaves" or bid.endswith("_leaves"):
+        if bid == "minecraft:leaves" or bid.endswith("_leaves") or "leaves" in bid:
             key = f"minecraft:leaves|{wood_type}"
             if key in VARIANT_PALETTE:
                 return VARIANT_PALETTE[key], key, True, "variant"
-        if bid in ("minecraft:log", "minecraft:planks") or bid.endswith(("_log", "_wood", "_stem", "_hyphae", "_planks")):
+        if bid in ("minecraft:log", "minecraft:planks") or bid.endswith(("_log", "_wood", "_stem", "_hyphae", "_planks")) or "log" in bid or "planks" in bid:
             key = f"minecraft:wood|{wood_type}"
             if key in VARIANT_PALETTE:
                 return VARIANT_PALETTE[key], key, True, "variant"
 
 
     # Variant-aware plant coloring (flowers / foliage)
-    if bid in ("minecraft:plant", "minecraft:double_plant", "minecraft:pink_petals", "minecraft:wildflowers") or bid.endswith(("plant", "petals", "wildflowers")):
+    if bid.startswith("minecraft:plant") or bid.startswith("minecraft:double_plant") or bid.endswith(("plant", "petals", "wildflowers")):
         plant_type = None
         for k in ("plant_type", "type", "variant"):
             if k in props:
@@ -3076,6 +3249,11 @@ def classify_block(block, extra_palette: Optional[Dict[str, Tuple[int, int, int]
     if color_name and color_name in COLOR_PALETTE:
         if any(x in bid for x in ("wool", "concrete", "terracotta", "stained_glass")):
             return COLOR_PALETTE[color_name], f"{bid}|{color_name}", True, "variant"
+
+    if bid.startswith("minecraft:leaves|") or bid.startswith("minecraft:wood|"):
+        variant_key = bid
+        if variant_key in VARIANT_PALETTE:
+            return VARIANT_PALETTE[variant_key], variant_key, True, "variant"
 
     # Direct palette hit (prefer canonical palette key that preserves wood/color variants)
     # Check extra_palette (palette editor) first, then fall back to built-in PALETTE.
@@ -3095,6 +3273,10 @@ def classify_block(block, extra_palette: Optional[Dict[str, Tuple[int, int, int]
 
     # Generic-ID fallback: resolve IDs like "minecraft:fence" or crop roots
     # using nearby palette family entries before dropping to gray unknown.
+    wiki_rgb = _wiki_base_color_for_block_id(bid)
+    if wiki_rgb is not None:
+        return wiki_rgb, report_key, True, "wiki_base_color"
+
     generic_rgb = _generic_palette_family_fallback(bid)
     if generic_rgb is not None:
         return generic_rgb, report_key, True, "generic_palette_fallback"
@@ -3768,12 +3950,76 @@ def _write_frame_unknowns_json(json_path: str, unknown_norm_counts: Counter) -> 
         pass  # Non-fatal: debug aid only
 
 
+def _write_frame_raw_ids_json(json_path: str, raw_counts: Counter) -> None:
+    """Write a machine-readable JSON file listing all raw block IDs seen in a frame.
+
+    This is a debug aid. The output is a mapping raw_id -> count.
+    """
+    try:
+        os.makedirs(os.path.dirname(json_path) or ".", exist_ok=True)
+        payload = {k: int(v) for k, v in raw_counts.items()}
+        with open(json_path, "w", encoding="utf-8") as f:
+            json.dump(payload, f, indent=2)
+    except Exception:
+        pass
+
+
+def _append_unique_raw_ids_to_runlog(out_png: str, raw_counts: Counter) -> None:
+    """Append unique raw ids to a run-level log file in the frame's output directory.
+
+    The file `run_raw_ids.log` is placed in the same directory as `out_png`.
+    Existing lines are treated as already-known IDs; only new IDs are appended.
+    Each appended line includes the mapped RGB and hex color that the renderer used.
+    """
+    def _extract_line_raw_id(line: str) -> str:
+        if "=>" in line:
+            return line.split("=>", 1)[0].strip()
+        if "=" in line:
+            return line.split("=", 1)[0].strip()
+        return line.strip()
+
+    try:
+        out_dir = os.path.dirname(out_png) or "."
+        log_path = os.path.join(out_dir, "run_raw_ids.log")
+        existing = set()
+        if os.path.isfile(log_path):
+            try:
+                with open(log_path, "r", encoding="utf-8") as f:
+                    for ln in f:
+                        ln = ln.strip()
+                        if ln:
+                            existing.add(_extract_line_raw_id(ln))
+            except Exception:
+                existing = set()
+        new_ids = [rid for rid in raw_counts.keys() if rid not in existing]
+        if not new_ids:
+            return
+        os.makedirs(out_dir, exist_ok=True)
+        with open(log_path, "a", encoding="utf-8") as f:
+            for rid in new_ids:
+                try:
+                    rgb, _, _, _ = classify_block(rid)
+                    r, g, b = rgb
+                    hex_code = f"#{r:02x}{g:02x}{b:02x}"
+                    f.write(f"{rid} => rgb({r},{g},{b}) {hex_code}\n")
+                except Exception:
+                    f.write(f"{rid} => rgb(180,180,180) #b4b4b4\n")
+    except Exception:
+        pass
+
+
 def _reason_needs_real_palette_entry(reason: Any, is_known: bool) -> bool:
-    """Return True unless a block came from an exact palette/editor palette entry."""
+    """Return True only for blocks that were not classified at all.
+
+    Variant, wiki-base-color, generic-fallback, and heuristic paths are treated as
+    known classifications, so they should not be reported as unknown blocks.
+    """
     if not is_known:
         return True
     r = str(reason or "").strip().lower()
-    return r not in {"palette", "editor_palette"}
+    if r in {"unknown"}:
+        return True
+    return False
 
 
 def compute_blocks_per_pixel(width_blocks: int, height_blocks: int, target: Optional[Tuple[int, int]]) -> int:
@@ -3904,6 +4150,18 @@ def find_top_block_in_column(
         y -= step
 
     if y_hit is None:
+        # Coarse scan failed to find a non-skippable block. Fall back to a full
+        # precise scan before declaring the column empty. This avoids black pixels
+        # when a top block was missed by the fast scan heuristic.
+        for yy in range(y_max, y_min - 1, -1):
+            if cancel_event is not None and cancel_event.is_set():
+                return False, 0, ""
+            b = get_block(lx, yy, lz)
+            raw = _raw_block_id(b)
+            bid = normalize_block_id(raw)
+            if is_skippable(bid):
+                continue
+            return True, yy, raw
         return False, y_min, "minecraft:air"
 
     refine_top = min(y_max, y_hit + max(20, step * 3))
@@ -4898,6 +5156,7 @@ def render_cached_world_map(
     empty_y = int(cached_y_min) if cache_mode == CACHE_MODE_ALL_BLOCKS else int(opt.y_min)
     hmap = np.full((h_px, w_px), empty_y, dtype=np.int16)
     block_lookup = read_block_lookup(cache_path)
+    raw_id_counts: Counter = Counter()
     colored_cols = 0
     air_only_cols = 0
     chunks_rendered = 0
@@ -4948,12 +5207,25 @@ def render_cached_world_map(
                 if int(found_arr[lz, lx]):
                     block_id = int(id_arr[lz, lx])
                     raw = block_lookup[block_id] if 0 <= block_id < len(block_lookup) else "minecraft:air"
+                    raw_id_counts[raw] += 1
                     _ep = opt.editor_palette if opt.use_editor_palette else None
                     rgb_px, norm_id, is_known, reason = classify_block(raw, _ep)
                     if _reason_needs_real_palette_entry(reason, is_known):
                         unknown_norm_counts[norm_id] += 1
                     rgb[iz, ix, :] = rgb_px
                     hmap[iz, ix] = int(y_arr[lz, lx])
+                    colored_cols += 1
+                elif not opt.skip_water and int(arrays["dry_found"][lz, lx]):
+                    # Defensive fallback: if surface detection did not mark a top
+                    # block but a dry block exists, use the dry block instead.
+                    block_id = int(arrays["dry_id"][lz, lx])
+                    raw = block_lookup[block_id] if 0 <= block_id < len(block_lookup) else "minecraft:air"
+                    _ep = opt.editor_palette if opt.use_editor_palette else None
+                    rgb_px, norm_id, is_known, reason = classify_block(raw, _ep)
+                    if _reason_needs_real_palette_entry(reason, is_known):
+                        unknown_norm_counts[norm_id] += 1
+                    rgb[iz, ix, :] = rgb_px
+                    hmap[iz, ix] = int(arrays["dry_y"][lz, lx])
                     colored_cols += 1
                 else:
                     rgb[iz, ix, :] = (0, 0, 0)
@@ -4970,12 +5242,25 @@ def render_cached_world_map(
         rgb_f = rgb.astype(np.float32) * shade[..., None] * altitude
         rgb = np.clip(rgb_f, 0, 255).astype(np.uint8)
 
+    unknown_cols = sum(unknown_norm_counts.values())
+    if log_cb is not None:
+        log_cb(f"[CACHE] Column scan results: colored={colored_cols} air_only={air_only_cols} unknown_colored={unknown_cols}")
+
     img = Image.fromarray(rgb, mode="RGB")
     img = fit_to_target(img, target)
     img_w, img_h = img.size
     _atomic_save_png(img, out_png, log=log_cb)
     if log_cb is not None:
         log_cb(f"Rendered from cache: {cache_path}")
+
+    # Write per-frame raw ids JSON if requested
+    if opt.debug_raw_ids and raw_id_counts:
+        raw_json_path = os.path.splitext(out_png)[0] + "_raw_ids.json"
+        _write_frame_raw_ids_json(raw_json_path, raw_id_counts)
+        try:
+            _append_unique_raw_ids_to_runlog(out_png, raw_id_counts)
+        except Exception:
+            pass
 
     # Write per-frame unknowns JSON so worker_run can aggregate it.
     if unknown_norm_counts:
@@ -5322,6 +5607,8 @@ def render_world_map(
 
 
             from worker_fn_module import worker_fn, iter_sample_positions
+            # Shared counter for debug raw ids (aggregated from workers)
+            world_raw_counts: Counter = Counter()
     
             if stage_cb is not None:
                 stage_cb(f"raw.chunk_scan.start chunks={chunks_total} workers={n_workers}")
@@ -5343,6 +5630,7 @@ def render_world_map(
                         find_top_block_in_column,
                         iter_sample_positions,
                         classify_block,
+                        world_raw_counts,
                     )
                     for i, part in enumerate(parts)
                 ]
@@ -5365,12 +5653,9 @@ def render_world_map(
     
             maybe_write_debug_snapshot(force=True)
     
-            if chunks_rendered == 0:
-                raise RuntimeError("No chunks could be loaded (all chunk fetches failed).")
-    
-            if progress_cb is not None:
-                progress_cb(chunks_total, chunks_total, 1.0)
-    
+            if log_cb is not None:
+                log_cb(f"[RAW] Column scan results: colored={colored_cols} air_only={air_only_cols} unknown_colored={unknown_cols}")
+
             if opt.hillshade_mode != "none":
                 shade = compute_hillshade(hmap, opt.hillshade_mode)
                 altitude = compute_altitude_tint(hmap, opt.hillshade_mode, opt.dimension)
@@ -5400,6 +5685,18 @@ def render_world_map(
             if unknown_norm_counts:
                 unknown_json_path = os.path.splitext(out_png)[0] + "_unknowns.json"
                 _write_frame_unknowns_json(unknown_json_path, unknown_norm_counts)
+
+            # Write per-frame raw ids JSON if requested
+            try:
+                if opt.debug_raw_ids and world_raw_counts:
+                    raw_json_path = os.path.splitext(out_png)[0] + "_raw_ids.json"
+                    _write_frame_raw_ids_json(raw_json_path, world_raw_counts)
+                    try:
+                        _append_unique_raw_ids_to_runlog(out_png, world_raw_counts)
+                    except Exception:
+                        pass
+            except Exception:
+                pass
 
             return (min_x, max_x, min_z, max_z, chunks_rendered, chunks_skipped, colored_cols, air_only_cols, bpp, img_w, img_h)
     
@@ -5482,6 +5779,7 @@ def render_one_chunk_png(
 
         samples_set = set()
         max_samples = 150
+        raw_id_counts: Counter = Counter()
 
         for lx in range(16):
             if cancel_event and cancel_event.is_set():
@@ -5496,6 +5794,7 @@ def render_one_chunk_png(
 
                 if found:
                     _ep = opt.editor_palette if opt.use_editor_palette else None
+                    raw_id_counts[str(raw_id)] += 1
                     rgb_px, norm_id, is_known, reason = classify_block(raw_id, _ep)
                     colored_cols += 1
                     rgb[lz, lx, :] = rgb_px
@@ -5516,6 +5815,15 @@ def render_one_chunk_png(
                     hmap[lz, lx] = opt.y_min
 
         write_debug_snapshot(debug_txt, header, samples_raw, colored_cols, air_only_cols, unknown_cols, unknown_norm_counts)
+
+        # Write per-chunk raw ids JSON if requested
+        if opt.debug_raw_ids and raw_id_counts:
+            raw_json_path = os.path.splitext(out_png)[0] + "_raw_ids.json"
+            _write_frame_raw_ids_json(raw_json_path, raw_id_counts)
+            try:
+                _append_unique_raw_ids_to_runlog(out_png, raw_id_counts)
+            except Exception:
+                pass
 
         if opt.hillshade_mode != "none":
             shade = compute_hillshade(hmap, opt.hillshade_mode)
@@ -8401,6 +8709,7 @@ class App(tk.Tk):
         # Advanced options (hidden by toggle)
         self.advanced_open = tk.BooleanVar(value=False)
         self.debug_blocks_var = tk.BooleanVar(value=False)
+        self.debug_raw_ids_var = tk.BooleanVar(value=False)
         self.stop_on_bad_chunk_var = tk.BooleanVar(value=False)
         self.workers_var = tk.IntVar(value=3)
         self.fast_scan_var = tk.BooleanVar(value=False)
@@ -8536,6 +8845,7 @@ class App(tk.Tk):
             self.fast_scan_var.set(False)
             self.aggressive_var.set(False)
             self.debug_blocks_var.set(bool(tl.get("debug_blocks", self.debug_blocks_var.get())))
+            self.debug_raw_ids_var.set(bool(tl.get("debug_raw_ids", self.debug_raw_ids_var.get())))
             self.stop_on_bad_chunk_var.set(bool(tl.get("stop_on_bad_chunk_data", self.stop_on_bad_chunk_var.get())))
 
             self.limit_enabled_var.set(bool(crop_cfg.get("enabled", self.limit_enabled_var.get())))
@@ -8571,6 +8881,7 @@ class App(tk.Tk):
                 "cache_dim_end": bool(self.cache_dim_end_var.get()),
                 "auto_tune": True,
                 "debug_blocks": bool(self.debug_blocks_var.get()),
+                "debug_raw_ids": bool(self.debug_raw_ids_var.get()),
                 "stop_on_bad_chunk_data": bool(self.stop_on_bad_chunk_var.get()),
                 "use_editor_palette": bool(self.use_editor_palette_var.get()),
                 "crop": {
@@ -8853,8 +9164,9 @@ class App(tk.Tk):
         ttk.Entry(self.adv_frame, textvariable=self.fps_var, width=10).grid(row=1, column=1, sticky="w", **pad)
 
         ttk.Checkbutton(self.adv_frame, text="Debug block IDs + unknowns", variable=self.debug_blocks_var).grid(row=2, column=0, columnspan=2, sticky="w", **pad)
+        ttk.Checkbutton(self.adv_frame, text="Log unique raw block IDs to run_raw_ids.log", variable=self.debug_raw_ids_var).grid(row=2, column=2, columnspan=1, sticky="w", **pad)
         self.debug_btn = ttk.Button(self.adv_frame, text="Debug: render 1 chunk…", command=self.on_debug_one_chunk)
-        self.debug_btn.grid(row=2, column=2, sticky="w", **pad)
+        self.debug_btn.grid(row=2, column=3, sticky="w", **pad)
         ttk.Checkbutton(
             self.adv_frame,
             text="Stop cache building or rendering on bad chunk data",
@@ -11030,6 +11342,7 @@ class App(tk.Tk):
         opt.aggressive_mode = False
         opt.debug_block_samples = bool(self.debug_blocks_var.get())
         opt.stop_on_bad_chunk_data = bool(self.stop_on_bad_chunk_var.get())
+        opt.debug_raw_ids = bool(self.debug_raw_ids_var.get())
 
         opt.auto_crop_90 = bool(self.auto_crop_90_var.get())
         opt.limit_enabled = bool(self.limit_enabled_var.get()) and (not opt.auto_crop_90)

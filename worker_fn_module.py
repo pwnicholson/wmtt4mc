@@ -26,6 +26,7 @@ def worker_fn(
     find_top_block_in_column,
     iter_sample_positions_fn,
     classify_block_fn,
+    world_raw_counts,
 ):
     local_colored = 0
     local_air = 0
@@ -36,6 +37,7 @@ def worker_fn(
     local_exact_key_miss_counts = Counter()
     local_base_id_miss_counts = Counter()
     local_unknown_raw_counts = Counter()
+    local_raw_counts = Counter()
     strict_bad_chunk = bool(getattr(opt, "stop_on_bad_chunk_data", False))
 
     for (cx, cz) in coords:
@@ -96,6 +98,8 @@ def worker_fn(
                 )
                 if found:
                     raw_str = str(raw_block)
+                    # Track every raw block seen for debug mode (counts only)
+                    local_raw_counts[raw_str] += 1
                     try:
                         rgb_px, norm_id, is_known, reason = classify_block_fn(raw_block)
                     except Exception:
@@ -169,3 +173,9 @@ def worker_fn(
         unknown_raw_counts.update(local_unknown_raw_counts)
         exact_key_miss_counts.update(local_exact_key_miss_counts)
         base_id_miss_counts.update(local_base_id_miss_counts)
+        # Aggregate per-worker raw block counts into the shared raw counts if provided
+        try:
+            if world_raw_counts is not None:
+                world_raw_counts.update(local_raw_counts)
+        except Exception:
+            pass
